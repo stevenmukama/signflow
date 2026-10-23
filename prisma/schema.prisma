@@ -1,0 +1,31 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Document {
+  id           String   @id
+  name         String
+  type         String // "pdf" | "docx"
+  size         Int
+  originalPath String
+  filePath     String
+  edits        String? // PDF: JSON array of PdfEditItem | DOCX: edited HTML
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Signature {
+  id        String   @id @default(cuid())
+  name      String
+  type      String // "draw" | "type" | "upload"
+  dataUrl   String
+  createdAt DateTime @default(now())
+}

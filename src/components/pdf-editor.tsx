@@ -78,6 +78,7 @@ interface DragState {
   overlay: HTMLDivElement
   handle?: 'se' | 'sw' | 'ne' | 'nw' | 'e' | 'w' | 'n' | 's'
   points?: Array<[number, number]>
+  origPoints?: Array<[number, number]>
 }
 
 const clamp = (n: number, min: number, max: number) => Math.min(Math.max(n, min), max)
@@ -891,9 +892,18 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
               }
             }
             if (it.kind === "drawing") {
-              const newPoints = it.points.map(([px, py]): [number, number] => [
-                clamp(px + dx, 0, 1),
-                clamp(py + dy, 0, 1),
+              const basePoints = d.origPoints || it.points
+              const minDx = -d.origX
+              const maxDx = Math.max(minDx, 1 - (d.origX + d.origW))
+              const minDy = -d.origY
+              const maxDy = Math.max(minDy, 1 - (d.origY + d.origH))
+
+              const boundedDx = clamp(dx, minDx, maxDx)
+              const boundedDy = clamp(dy, minDy, maxDy)
+
+              const newPoints = basePoints.map(([px, py]): [number, number] => [
+                clamp(px + boundedDx, 0, 1),
+                clamp(py + boundedDy, 0, 1),
               ])
               return { ...it, points: newPoints }
             }
@@ -1051,8 +1061,13 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
     const latestItem = itemsRef.current.find((it) => it.id === item.id) || item
     const pAspect = pagePt ? pagePt.h / pagePt.w : 1.3
     const orig = origOf(latestItem, pAspect)
+    const origPoints =
+      latestItem.kind === 'drawing'
+        ? latestItem.points.map(([px, py]): [number, number] => [px, py])
+        : undefined
+
     startDrag({
-      mode: item.kind === 'signature' ? 'move' : 'maybe-move',
+      mode: item.kind === 'signature' || item.kind === 'drawing' ? 'move' : 'maybe-move',
       id: item.id,
       startX,
       startY,
@@ -1063,6 +1078,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
       origW: orig.w,
       origH: orig.h,
       overlay,
+      origPoints,
     })
   }
 
@@ -1123,7 +1139,6 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
         opacity: 1,
       }
       setItems((prev) => [...prev, newItem])
-      setSelectedId(id)
       startDrag({
         mode: 'draw',
         id,
@@ -1761,16 +1776,21 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                             const d = pointsToSvgPath(item.points, displayW, displayH)
                             const scale = pagePt ? displayW / pagePt.w : 1
                             const strokePx = Math.max(1, item.strokeWidth * scale)
+                            const isInteractive = tool === 'select' || selected
                             return (
-                              <g key={item.id} data-pdf-item="true" className="pointer-events-auto">
+                              <g
+                                key={item.id}
+                                data-pdf-item="true"
+                                className={isInteractive ? 'pointer-events-auto' : 'pointer-events-none'}
+                              >
                                 <path
                                   d={d}
                                   stroke="transparent"
-                                  strokeWidth={Math.max(20, strokePx + 16)}
+                                  strokeWidth={Math.max(14, strokePx + 10)}
                                   strokeLinecap="round"
                                   strokeLinejoin="round"
                                   fill="none"
-                                  className="cursor-pointer"
+                                  className={selected ? 'cursor-move' : 'cursor-pointer'}
                                   onPointerDown={(e) => onItemPointerDown(e, item)}
                                 />
                                 {selected && (
@@ -1783,6 +1803,8 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                                     fill="none"
                                     opacity={0.65}
                                     strokeDasharray="4 4"
+                                    className="cursor-move"
+                                    onPointerDown={(e) => onItemPointerDown(e, item)}
                                   />
                                 )}
                                 <path
@@ -1793,7 +1815,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                                   strokeLinejoin="round"
                                   fill="none"
                                   opacity={item.opacity ?? 1}
-                                  className="cursor-pointer"
+                                  className={selected ? 'cursor-move' : 'cursor-pointer'}
                                   onPointerDown={(e) => onItemPointerDown(e, item)}
                                 />
                               </g>

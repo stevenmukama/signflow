@@ -65,7 +65,7 @@ interface PdfEditorProps {
 }
 
 interface DragState {
-  mode: 'move' | 'maybe-move' | 'resize' | 'create-rect'
+  mode: 'move' | 'maybe-move' | 'resize' | 'create-rect' | 'draw'
   id: string
   startX: number
   startY: number
@@ -77,6 +77,7 @@ interface DragState {
   origH: number
   overlay: HTMLDivElement
   handle?: 'se' | 'sw' | 'ne' | 'nw' | 'e' | 'w' | 'n' | 's'
+  points?: Array<[number, number]>
 }
 
 const clamp = (n: number, min: number, max: number) => Math.min(Math.max(n, min), max)
@@ -96,11 +97,45 @@ const TEXT_COLORS = [
   '#ffffff',
 ]
 
+const PEN_COLORS = [
+  "#0f172a",
+  "#2563eb",
+  "#dc2626",
+  "#16a34a",
+  "#9333ea",
+  "#d97706",
+]
+
+function pointsToSvgPath(points: Array<[number, number]>, width: number, height: number): string {
+  if (!points || points.length === 0) return ""
+  if (points.length === 1) {
+    const x = points[0][0] * width
+    const y = points[0][1] * height
+    return `M ${x} ${y} L ${x + 0.1} ${y + 0.1}`
+  }
+  let d = `M ${points[0][0] * width} ${points[0][1] * height}`
+  for (let i = 1; i < points.length; i++) {
+    d += ` L ${points[i][0] * width} ${points[i][1] * height}`
+  }
+  return d
+}
+
 function origOf(item: PdfEditItem, pageAspect = 1.3) {
-  if (item.kind === 'text') return { x: item.x, y: item.y, w: 0.1, h: 0.05 }
-  if (item.kind === 'signature') {
-    const h = typeof item.h === 'number' && item.h > 0 ? item.h : (item.w * (item.aspect || 0.4)) / pageAspect
+  if (item.kind === "text") return { x: item.x, y: item.y, w: 0.1, h: 0.05 }
+  if (item.kind === "signature") {
+    const h = typeof item.h === "number" && item.h > 0 ? item.h : (item.w * (item.aspect || 0.4)) / pageAspect
     return { x: item.x, y: item.y, w: item.w, h }
+  }
+  if (item.kind === "drawing") {
+    if (item.points.length === 0) return { x: 0, y: 0, w: 0.05, h: 0.05 }
+    let minX = 1, minY = 1, maxX = 0, maxY = 0
+    for (const [px, py] of item.points) {
+      if (px < minX) minX = px
+      if (px > maxX) maxX = px
+      if (py < minY) minY = py
+      if (py > maxY) maxY = py
+    }
+    return { x: minX, y: minY, w: Math.max(0.01, maxX - minX), h: Math.max(0.01, maxY - minY) }
   }
   return { x: item.x, y: item.y, w: item.w, h: item.h }
 }
@@ -349,7 +384,11 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
   const resizeBothSidesRef = useRef(resizeBothSides)
   resizeBothSidesRef.current = resizeBothSides
 
+  const [penColor, setPenColor] = useState<string>("#0f172a")
+  const [penWidth, setPenWidth] = useState<number>(3)
+
   const displayW = Math.round(Math.min(720, Math.max(280, containerW)) * zoom)
+  const displayH = pagePt ? Math.round((displayW * pagePt.h) / pagePt.w) : Math.round(displayW * 1.3)
   const pxPerPt = pagePt ? displayW / pagePt.w : 0
   const pageItems = items.filter((i) => i.page === pageNum - 1)
   const selectedItem = items.find((i) => i.id === selectedId) ?? null
@@ -434,6 +473,13 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
         } else {
           return { ...it, x: clamp(it.y, 0, 1), y: clamp(1 - it.x - 0.1, 0, 1) }
         }
+      } else if (it.kind === "drawing") {
+        const newPoints = it.points.map(([px, py]): [number, number] => {
+          if (normDelta === 90) return [clamp(1 - py, 0, 1), clamp(px, 0, 1)]
+          if (normDelta === 180) return [clamp(1 - px, 0, 1), clamp(1 - py, 0, 1)]
+          return [clamp(py, 0, 1), clamp(1 - px, 0, 1)]
+        })
+        return { ...it, points: newPoints }
       } else {
         const w = it.w
         const h = it.kind === 'signature' ? (typeof it.h === 'number' && it.h > 0 ? it.h : w * it.aspect) : it.h
@@ -470,6 +516,13 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
         } else {
           return { ...it, x: clamp(it.y, 0, 1), y: clamp(1 - it.x - 0.1, 0, 1) }
         }
+      } else if (it.kind === "drawing") {
+        const newPoints = it.points.map(([px, py]): [number, number] => {
+          if (normDelta === 90) return [clamp(1 - py, 0, 1), clamp(px, 0, 1)]
+          if (normDelta === 180) return [clamp(1 - px, 0, 1), clamp(1 - py, 0, 1)]
+          return [clamp(py, 0, 1), clamp(1 - px, 0, 1)]
+        })
+        return { ...it, points: newPoints }
       } else {
         const w = it.w
         const h = it.kind === 'signature' ? (typeof it.h === 'number' && it.h > 0 ? it.h : w * it.aspect) : it.h
@@ -796,6 +849,19 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
       const dx = curX - d.startX
       const dy = curY - d.startY
 
+      if (d.mode === 'draw') {
+        const pts = d.points || []
+        const last = pts[pts.length - 1]
+        if (!last || Math.hypot(curX - last[0], curY - last[1]) > 0.002) {
+          pts.push([curX, curY])
+          d.points = pts
+          setItems((prev) =>
+            prev.map((it) => (it.id === d.id && it.kind === 'drawing' ? { ...it, points: [...pts] } : it)),
+          )
+        }
+        return
+      }
+
       if (d.mode === 'maybe-move') {
         if (Math.hypot(dx, dy) > 0.006) {
           d.mode = 'move'
@@ -823,6 +889,13 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                 x: clamp(d.origX + dx, 0, Math.max(0, 1 - it.w)),
                 y: clamp(d.origY + dy, 0, Math.max(0, 1 - sigH)),
               }
+            }
+            if (it.kind === "drawing") {
+              const newPoints = it.points.map(([px, py]): [number, number] => [
+                clamp(px + dx, 0, 1),
+                clamp(py + dy, 0, 1),
+              ])
+              return { ...it, points: newPoints }
             }
             return {
               ...it,
@@ -932,9 +1005,11 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
 
     const onUp = () => {
       const d = dragRef.current
-      if (d?.mode === 'create-rect') {
+      if (d?.mode === 'draw') {
+        commitItems(itemsRef.current)
+      } else if (d?.mode === 'create-rect') {
         const it = itemsRef.current.find((i) => i.id === d.id)
-        if (it && it.kind !== 'text' && it.kind !== 'signature' && it.w < 0.01 && it.h < 0.01) {
+        if (it && it.kind !== 'text' && it.kind !== 'signature' && it.kind !== 'drawing' && it.w < 0.01 && it.h < 0.01) {
           const pruned = itemsRef.current.filter((i) => i.id !== d.id)
           commitItems(pruned)
         } else {
@@ -1032,6 +1107,37 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
 
     if (tool === 'select') {
       setSelectedId(null)
+      return
+    }
+
+    if (tool === 'draw') {
+      const id = newId()
+      const initialPts: Array<[number, number]> = [[fx, fy]]
+      const newItem: PdfEditItem = {
+        id,
+        kind: 'drawing',
+        page: pageNum - 1,
+        points: initialPts,
+        color: penColor,
+        strokeWidth: penWidth,
+        opacity: 1,
+      }
+      setItems((prev) => [...prev, newItem])
+      setSelectedId(id)
+      startDrag({
+        mode: 'draw',
+        id,
+        startX: fx,
+        startY: fy,
+        anchorX: fx,
+        anchorY: fy,
+        origX: fx,
+        origY: fy,
+        origW: 0,
+        origH: 0,
+        overlay,
+        points: initialPts,
+      })
       return
     }
 
@@ -1142,6 +1248,8 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
     }
   }
 
+
+
   // --------------------------------------------------------------- mutations
   const updateItem = (id: string, patch: Partial<PdfEditItem>) => {
     const updated = itemsRef.current.map((it) => (it.id === id ? ({ ...it, ...patch } as PdfEditItem) : it))
@@ -1234,6 +1342,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
   const tools: { id: PdfTool; icon: React.ComponentType<{ className?: string }>; label: string }[] = [
     { id: 'select', icon: MousePointer2, label: 'Select & move' },
     { id: 'text', icon: Type, label: 'Add text' },
+    { id: 'draw', icon: Pencil, label: 'Draw / Pen' },
     { id: 'date', icon: Calendar, label: 'Date stamp' },
     { id: 'check', icon: Check, label: 'Checkmark' },
     { id: 'highlight', icon: Highlighter, label: 'Highlight' },
@@ -1488,6 +1597,54 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
         </div>
       </header>
 
+      {/* Active Pen Tool Toolbar */}
+      {tool === "draw" && (
+        <div className="flex items-center gap-3 border-b bg-muted/40 px-4 py-1.5 text-xs shrink-0">
+          <div className="flex items-center gap-1.5 font-medium text-foreground">
+            <Pencil className="size-3.5 text-emerald-600" />
+            <span>Pen Settings:</span>
+          </div>
+          <div className="flex items-center gap-1" role="group" aria-label="Pen stroke width">
+            {[
+              { label: "Fine", w: 2 },
+              { label: "Medium", w: 4 },
+              { label: "Bold", w: 7 },
+            ].map(({ label, w }) => (
+              <Button
+                key={w}
+                type="button"
+                size="sm"
+                variant={penWidth === w ? "default" : "ghost"}
+                className="h-6 px-2 text-xs"
+                onClick={() => setPenWidth(w)}
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
+          <Separator orientation="vertical" className="h-4" />
+          <div className="flex items-center gap-1.5" role="group" aria-label="Pen color">
+            {PEN_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                aria-label={`Pen color ${c}`}
+                className={cn(
+                  "size-5 rounded-full border shadow-xs transition-transform hover:scale-110",
+                  penColor === c ? "ring-2 ring-emerald-600 ring-offset-1" : "",
+                  c === "#ffffff" ? "border-zinc-300" : "border-transparent",
+                )}
+                style={{ backgroundColor: c }}
+                onClick={() => setPenColor(c)}
+              />
+            ))}
+          </div>
+          <span className="text-muted-foreground ml-auto text-[11px] hidden sm:inline">
+            Click and drag anywhere on the page to draw.
+          </span>
+        </div>
+      )}
+
       {/* body with optional thumbnail sidebar */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Thumbnails Sidebar */}
@@ -1584,14 +1741,69 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                     'absolute inset-0',
                     (tool === 'text' || tool === 'date') && 'cursor-text',
                     tool === 'check' && 'cursor-pointer',
-                    (tool === 'highlight' || tool === 'blackout') && 'cursor-crosshair',
+                    (tool === 'highlight' || tool === 'blackout' || tool === 'draw') && 'cursor-crosshair',
                     tool === 'signature' && 'cursor-copy',
                   )}
-                  style={{ touchAction: 'pan-y' }}
+                  style={{ touchAction: tool === 'draw' ? 'none' : 'pan-y' }}
                   onPointerDown={onOverlayPointerDown}
                 >
-                  {pagePt &&
-                    pageItems.map((item) => {
+                  {pagePt && (
+                    <>
+                      {/* SVG Drawing Layer */}
+                      <svg
+                        className="absolute inset-0 size-full pointer-events-none overflow-visible z-10"
+                        viewBox={`0 0 ${displayW} ${displayH}`}
+                      >
+                        {pageItems
+                          .filter((it): it is Extract<PdfEditItem, { kind: "drawing" }> => it.kind === "drawing")
+                          .map((item) => {
+                            const selected = selectedId === item.id
+                            const d = pointsToSvgPath(item.points, displayW, displayH)
+                            const scale = pagePt ? displayW / pagePt.w : 1
+                            const strokePx = Math.max(1, item.strokeWidth * scale)
+                            return (
+                              <g key={item.id} data-pdf-item="true" className="pointer-events-auto">
+                                <path
+                                  d={d}
+                                  stroke="transparent"
+                                  strokeWidth={Math.max(20, strokePx + 16)}
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  fill="none"
+                                  className="cursor-pointer"
+                                  onPointerDown={(e) => onItemPointerDown(e, item)}
+                                />
+                                {selected && (
+                                  <path
+                                    d={d}
+                                    stroke="#10b981"
+                                    strokeWidth={strokePx + 5}
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    fill="none"
+                                    opacity={0.65}
+                                    strokeDasharray="4 4"
+                                  />
+                                )}
+                                <path
+                                  d={d}
+                                  stroke={item.color}
+                                  strokeWidth={strokePx}
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  fill="none"
+                                  opacity={item.opacity ?? 1}
+                                  className="cursor-pointer"
+                                  onPointerDown={(e) => onItemPointerDown(e, item)}
+                                />
+                              </g>
+                            )
+                          })}
+
+
+                      </svg>
+
+                      {pageItems.map((item) => {
                       const selected = item.id === selectedId
                       if (item.kind === 'text') {
                         return (
@@ -1906,6 +2118,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                         )
                       }
                       // highlight / blackout
+                      if (item.kind !== "highlight" && item.kind !== "blackout") return null
                       return (
                         <div key={item.id} data-pdf-item="true">
                           <div
@@ -1942,6 +2155,8 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                         </div>
                       )
                     })}
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -1958,8 +2173,50 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                         ? 'Signature'
                         : selectedItem.kind === 'highlight'
                           ? 'Highlight'
-                          : 'Redaction'}
+                          : selectedItem.kind === 'drawing'
+                            ? 'Drawing / Pen'
+                            : 'Redaction'}
                   </span>
+                  {selectedItem.kind === 'drawing' && (
+                    <>
+                      <Separator orientation="vertical" className="h-6" />
+                      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <span>Width</span>
+                        {[
+                          { label: 'Thin', w: 2 },
+                          { label: 'Medium', w: 4 },
+                          { label: 'Thick', w: 7 },
+                        ].map(({ label, w }) => (
+                          <Button
+                            key={w}
+                            size="sm"
+                            variant={selectedItem.strokeWidth === w ? 'default' : 'outline'}
+                            className="h-7 px-2 text-xs"
+                            onClick={() => updateItem(selectedItem.id, { strokeWidth: w })}
+                          >
+                            {label}
+                          </Button>
+                        ))}
+                      </div>
+                      <Separator orientation="vertical" className="h-6" />
+                      <div className="flex items-center gap-1.5" role="group" aria-label="Stroke color">
+                        {PEN_COLORS.map((c) => (
+                          <button
+                            key={c}
+                            type="button"
+                            aria-label={`Stroke color ${c}`}
+                            className={cn(
+                              "size-6 rounded-full border shadow-sm transition-transform hover:scale-110",
+                              selectedItem.color === c ? "ring-2 ring-emerald-600 ring-offset-2" : "",
+                              c === "#ffffff" ? "border-zinc-300" : "border-transparent",
+                            )}
+                            style={{ backgroundColor: c }}
+                            onClick={() => updateItem(selectedItem.id, { color: c })}
+                          />
+                        ))}
+                      </div>
+                    </>
+                  )}
                   {selectedItem.kind === 'text' && (
                     <>
                       <Separator orientation="vertical" className="h-6" />

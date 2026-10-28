@@ -68,10 +68,20 @@ export type PdfEditItem =
       h: number // fractions of page width/height
       color?: string // optional custom highlight color
     }
+  | {
+      id: string
+      kind: 'drawing'
+      page: number
+      points: Array<[number, number]> // [x, y] fractions of page width & height (0..1)
+      color: string // hex color e.g. #0f172a, #2563eb, #dc2626
+      strokeWidth: number // in PDF points e.g. 2, 4, 7
+      opacity?: number // stroke opacity 0..1
+    }
 
 export type PdfTool =
   | 'select'
   | 'text'
+  | 'draw'
   | 'date'
   | 'check'
   | 'highlight'

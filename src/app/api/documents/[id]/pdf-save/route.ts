@@ -65,6 +65,22 @@ function parseItems(raw: unknown): PdfEditItem[] | null {
           ? it.color
           : undefined
       items.push({ id, kind: it.kind, page, x, y, w, h, ...(color ? { color } : {}) })
+    } else if (it.kind === 'drawing') {
+      if (!Array.isArray(it.points) || it.points.length === 0 || it.points.length > 10000) return null
+      const points: Array<[number, number]> = []
+      for (const pt of it.points) {
+        if (!Array.isArray(pt) || pt.length < 2) return null
+        points.push([clamp01(pt[0]), clamp01(pt[1])])
+      }
+      const color =
+        typeof it.color === 'string' && /^#[0-9a-f]{6}$/i.test(it.color) ? it.color : '#0f172a'
+      const strokeWidth =
+        typeof it.strokeWidth === 'number' && it.strokeWidth > 0 && it.strokeWidth <= 60
+          ? it.strokeWidth
+          : 3
+      const opacity =
+        typeof it.opacity === 'number' && it.opacity >= 0 && it.opacity <= 1 ? it.opacity : 1
+      items.push({ id, kind: 'drawing', page, points, color, strokeWidth, opacity })
     } else {
       return null
     }
@@ -258,6 +274,48 @@ export async function POST(
           opacity: 0.45,
           blendMode: BlendMode.Multiply,
         })
+      } else if (item.kind === 'drawing') {
+        const { r, g, b } = hexToRgb(item.color)
+        const strokeColor = rgb(r, g, b)
+        const thickness = item.strokeWidth || 3
+        const opacity = item.opacity ?? 1
+
+        if (item.points.length === 1) {
+          page.drawCircle({
+            x: item.points[0][0] * pw,
+            y: ph - item.points[0][1] * ph,
+            size: thickness / 2,
+            color: strokeColor,
+            opacity,
+          })
+        } else {
+          for (let i = 0; i < item.points.length - 1; i++) {
+            const p1 = item.points[i]
+            const p2 = item.points[i + 1]
+            page.drawLine({
+              start: { x: p1[0] * pw, y: ph - p1[1] * ph },
+              end: { x: p2[0] * pw, y: ph - p2[1] * ph },
+              thickness,
+              color: strokeColor,
+              opacity,
+            })
+            page.drawCircle({
+              x: p1[0] * pw,
+              y: ph - p1[1] * ph,
+              size: thickness / 2,
+              color: strokeColor,
+              opacity,
+            })
+          }
+          const last = item.points[item.points.length - 1]
+          page.drawCircle({
+            x: last[0] * pw,
+            y: ph - last[1] * ph,
+            size: thickness / 2,
+            color: strokeColor,
+            opacity,
+          })
+        }
       } else {
         // Blackout: collected here and applied after all other edits, so it also
         // covers any text/signature placed beneath it.

@@ -33,6 +33,13 @@
 - **Saved Signature Library**: Save favorite signatures to easily stamp and place across multiple documents without re-drawing.
 - **Move & Resize**: Drag, position, and resize signatures directly on any page.
 
+### ✏️ Freehand Pen & Drawing Tool
+- **Smooth Vector Drawing**: Sketch, circle clauses, draw arrows, or write handwritten notes directly onto documents.
+- **Custom Stroke Widths & Colors**: Choose Fine (2pt), Medium (4pt), or Bold (7pt) widths and a versatile palette of colors (Slate, Royal Blue, Crimson Red, Emerald Green, Purple, Amber).
+- **Interactive Editing**: Click any completed stroke to adjust color, change stroke thickness, move it, or delete it.
+- **Lossless Vector Baking**: Exported PDFs bake drawings as crisp vector lines and joints using `pdf-lib`.
+- **Integrated History**: Full Undo (`Ctrl+Z`) and Redo (`Ctrl+Y`) support for all drawn strokes.
+
 ### 🖍️ Annotations & Redaction
 - **Text Boxes**: Add customizable text notes, labels, and form fills.
 - **Highlighter**: Emphasize important text sections with translucent highlights.

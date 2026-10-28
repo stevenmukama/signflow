@@ -36,7 +36,8 @@
 ### ✏️ Freehand Pen & Drawing Tool
 - **Smooth Vector Drawing**: Sketch, circle clauses, draw arrows, or write handwritten notes directly onto documents.
 - **Custom Stroke Widths & Colors**: Choose Fine (2pt), Medium (4pt), or Bold (7pt) widths and a versatile palette of colors (Slate, Royal Blue, Crimson Red, Emerald Green, Purple, Amber).
-- **Interactive Editing**: Click any completed stroke to adjust color, change stroke thickness, move it, or delete it.
+- **8-Way Interactive Resizing**: Resize drawn lines and sketches from any of the 4 edges (top, bottom, left, right) or 4 corners (NW, NE, SW, SE) with proportional vector point scaling and border margin detection.
+- **Interactive Editing**: Click any completed stroke to adjust color, change stroke thickness, move, scale, or delete it.
 - **Lossless Vector Baking**: Exported PDFs bake drawings as crisp vector lines and joints using `pdf-lib`.
 - **Integrated History**: Full Undo (`Ctrl+Z`) and Redo (`Ctrl+Y`) support for all drawn strokes.
 

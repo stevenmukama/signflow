@@ -982,6 +982,55 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
 
               return { ...it, x: newX, y: newY, w: newW, h: newH }
             }
+            if (it.kind === 'drawing') {
+              const basePoints = d.origPoints || it.points
+              const handle = d.handle ?? 'se'
+
+              const affectsX =
+                handle === 'e' || handle === 'w' || handle === 'se' || handle === 'sw' || handle === 'ne' || handle === 'nw'
+              const affectsY =
+                handle === 'n' || handle === 's' || handle === 'se' || handle === 'sw' || handle === 'ne' || handle === 'nw'
+
+              let newX = d.origX
+              let newW = d.origW
+              let newY = d.origY
+              let newH = d.origH
+
+              if (affectsX) {
+                if (handle === 'e' || handle === 'se' || handle === 'ne') {
+                  const maxW = Math.max(0.01, 1 - d.origX)
+                  newW = clamp(d.origW + dx, 0.01, maxW)
+                  newX = d.origX
+                } else {
+                  const rightEdge = d.origX + d.origW
+                  newW = clamp(d.origW - dx, 0.01, rightEdge)
+                  newX = clamp(rightEdge - newW, 0, Math.max(0, 1 - newW))
+                }
+              }
+
+              if (affectsY) {
+                if (handle === 's' || handle === 'se' || handle === 'sw') {
+                  const maxH = Math.max(0.01, 1 - d.origY)
+                  newH = clamp(d.origH + dy, 0.01, maxH)
+                  newY = d.origY
+                } else {
+                  const bottomEdge = d.origY + d.origH
+                  newH = clamp(d.origH - dy, 0.01, bottomEdge)
+                  newY = clamp(bottomEdge - newH, 0, Math.max(0, 1 - newH))
+                }
+              }
+
+              const newPoints = basePoints.map(([px, py]): [number, number] => {
+                const normX = d.origW > 0.0001 ? (px - d.origX) / d.origW : 0.5
+                const normY = d.origH > 0.0001 ? (py - d.origY) / d.origH : 0.5
+                return [
+                  clamp(newX + normX * newW, 0, 1),
+                  clamp(newY + normY * newH, 0, 1),
+                ]
+              })
+
+              return { ...it, points: newPoints }
+            }
             if (it.kind === 'highlight' || it.kind === 'blackout') {
               if (handle === 'e') {
                 const newW = clamp(d.origW + dx, 0.01, 1 - it.x)
@@ -1096,6 +1145,10 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
     const latestItem = itemsRef.current.find((it) => it.id === item.id) || item
     const pAspect = pagePt ? pagePt.h / pagePt.w : 1.3
     const orig = origOf(latestItem, pAspect)
+    const origPoints =
+      latestItem.kind === 'drawing'
+        ? latestItem.points.map(([px, py]): [number, number] => [px, py])
+        : undefined
     startDrag({
       mode: 'resize',
       id: item.id,
@@ -1109,6 +1162,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
       origH: orig.h,
       overlay,
       handle,
+      origPoints,
     })
   }
 
@@ -2136,6 +2190,134 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                                 />
                               </>
                             )}
+                          </div>
+                        )
+                      }
+                      if (item.kind === 'drawing') {
+                        if (!selected) return null
+                        const orig = origOf(item, pagePt ? pagePt.h / pagePt.w : 1.3)
+                        return (
+                          <div
+                            key={item.id}
+                            data-pdf-item="true"
+                            className="absolute pointer-events-none border border-dashed border-emerald-500/80 rounded-xs z-20"
+                            style={{
+                              left: `${orig.x * 100}%`,
+                              top: `${orig.y * 100}%`,
+                              width: `${orig.w * 100}%`,
+                              height: `${orig.h * 100}%`,
+                            }}
+                          >
+                            {/* Top height handle (top pill/bar) */}
+                            <span
+                              role="button"
+                              aria-label="Resize height top"
+                              title="Drag upward or downward to resize height"
+                              className="absolute -top-2 left-1/2 -translate-x-1/2 h-2.5 w-7 cursor-ns-resize rounded-full border-2 border-white bg-emerald-600 shadow-md transition-transform hover:scale-125 flex items-center justify-center z-30 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              onPointerDown={(e) => onResizePointerDown(e, item, 'n')}
+                            >
+                              <span className="block h-0.5 w-2.5 bg-white/90 rounded-full" />
+                            </span>
+
+                            {/* Bottom height handle (bottom pill/bar) */}
+                            <span
+                              role="button"
+                              aria-label="Resize height bottom"
+                              title="Drag downward or upward to resize height"
+                              className="absolute -bottom-2 left-1/2 -translate-x-1/2 h-2.5 w-7 cursor-ns-resize rounded-full border-2 border-white bg-emerald-600 shadow-md transition-transform hover:scale-125 flex items-center justify-center z-30 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              onPointerDown={(e) => onResizePointerDown(e, item, 's')}
+                            >
+                              <span className="block h-0.5 w-2.5 bg-white/90 rounded-full" />
+                            </span>
+
+                            {/* Left width handle (side pill/bar) */}
+                            <span
+                              role="button"
+                              aria-label="Resize width left"
+                              title="Drag to resize width"
+                              className="absolute top-1/2 -left-2 -translate-y-1/2 h-7 w-2.5 cursor-ew-resize rounded-full border-2 border-white bg-emerald-600 shadow-md transition-transform hover:scale-125 flex items-center justify-center z-30 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              onPointerDown={(e) => onResizePointerDown(e, item, 'w')}
+                            >
+                              <span className="block w-0.5 h-2.5 bg-white/90 rounded-full" />
+                            </span>
+
+                            {/* Right width handle (side pill/bar) */}
+                            <span
+                              role="button"
+                              aria-label="Resize width right"
+                              title="Drag to resize width"
+                              className="absolute top-1/2 -right-2 -translate-y-1/2 h-7 w-2.5 cursor-ew-resize rounded-full border-2 border-white bg-emerald-600 shadow-md transition-transform hover:scale-125 flex items-center justify-center z-30 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              onPointerDown={(e) => onResizePointerDown(e, item, 'e')}
+                            >
+                              <span className="block w-0.5 h-2.5 bg-white/90 rounded-full" />
+                            </span>
+
+                            {/* Four corner handles */}
+                            <span
+                              role="button"
+                              aria-label="Resize drawing top-left"
+                              title="Drag to resize"
+                              className="absolute -top-1.5 -left-1.5 size-3.5 cursor-nwse-resize rounded-full border-2 border-white bg-emerald-600 shadow transition-transform hover:scale-125 z-30 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              onPointerDown={(e) => onResizePointerDown(e, item, 'nw')}
+                            />
+                            <span
+                              role="button"
+                              aria-label="Resize drawing top-right"
+                              title="Drag to resize"
+                              className="absolute -top-1.5 -right-1.5 size-3.5 cursor-nesw-resize rounded-full border-2 border-white bg-emerald-600 shadow transition-transform hover:scale-125 z-30 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              onPointerDown={(e) => onResizePointerDown(e, item, 'ne')}
+                            />
+                            <span
+                              role="button"
+                              aria-label="Resize drawing bottom-left"
+                              title="Drag to resize"
+                              className="absolute -bottom-1.5 -left-1.5 size-3.5 cursor-nesw-resize rounded-full border-2 border-white bg-emerald-600 shadow transition-transform hover:scale-125 z-30 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              onPointerDown={(e) => onResizePointerDown(e, item, 'sw')}
+                            />
+                            <span
+                              role="button"
+                              aria-label="Resize drawing bottom-right"
+                              title="Drag to resize"
+                              className="absolute -bottom-1.5 -right-1.5 size-3.5 cursor-nwse-resize rounded-full border-2 border-white bg-emerald-600 shadow transition-transform hover:scale-125 z-30 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              onPointerDown={(e) => onResizePointerDown(e, item, 'se')}
+                            />
+
+                            {/* Top draggable edge hitbox */}
+                            <div
+                              className="absolute inset-x-0 -top-1.5 h-3 cursor-ns-resize z-20 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              title="Drag to resize height"
+                              onPointerDown={(e) => onResizePointerDown(e, item, 'n')}
+                            />
+                            {/* Bottom draggable edge hitbox */}
+                            <div
+                              className="absolute inset-x-0 -bottom-1.5 h-3 cursor-ns-resize z-20 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              title="Drag to resize height"
+                              onPointerDown={(e) => onResizePointerDown(e, item, 's')}
+                            />
+                            {/* Left draggable edge hitbox */}
+                            <div
+                              className="absolute inset-y-0 -left-1.5 w-3 cursor-ew-resize z-20 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              title="Drag to resize width"
+                              onPointerDown={(e) => onResizePointerDown(e, item, 'w')}
+                            />
+                            {/* Right draggable edge hitbox */}
+                            <div
+                              className="absolute inset-y-0 -right-1.5 w-3 cursor-ew-resize z-20 pointer-events-auto"
+                              style={{ touchAction: 'none' }}
+                              title="Drag to resize width"
+                              onPointerDown={(e) => onResizePointerDown(e, item, 'e')}
+                            />
                           </div>
                         )
                       }

@@ -1,10 +1,11 @@
-import { writeFile } from 'fs/promises'
-import { readFile } from 'fs/promises'
+import { existsSync } from 'fs'
+import { copyFile, readFile, writeFile } from 'fs/promises'
 import { NextRequest, NextResponse } from 'next/server'
 import {
   BlendMode,
   PDFDocument,
   StandardFonts,
+  degrees,
   rgb,
   type PDFImage,
   type PDFPage,
@@ -12,8 +13,15 @@ import {
 
 import { db } from '@/lib/db'
 import { documentToDto } from '@/lib/documents'
-import { hexToRgb, sanitizeWinAnsi } from '@/lib/storage'
-import type { PdfEditItem } from '@/lib/types'
+import { applyRedactions, type RedactionBox } from '@/lib/pdf-redact'
+import { drawTextLine } from '@/lib/pdf-text'
+import {
+  hexToRgb,
+  originalDocFilePath,
+  resolveDocumentFilePath,
+  resolveDocumentOriginalPath,
+} from '@/lib/storage'
+import type { PageOps, PdfEditItem } from '@/lib/types'
 
 export const runtime = 'nodejs'
 
@@ -29,46 +37,34 @@ function clamp01(n: unknown, fallback = 0): number {
 function parseItems(raw: unknown): PdfEditItem[] | null {
   if (!Array.isArray(raw) || raw.length > 500) return null
   const items: PdfEditItem[] = []
-  for (const it of raw) {
-    if (!it || typeof it !== 'object') return null
-    const o = it as Record<string, unknown>
-    const id = typeof o.id === 'string' ? o.id.slice(0, 64) : null
-    const page = typeof o.page === 'number' && Number.isInteger(o.page) && o.page >= 0 ? o.page : null
-    if (!id || page === null) return null
-    if (o.kind === 'text') {
-      items.push({
-        id,
-        kind: 'text',
-        page,
-        x: clamp01(o.x),
-        y: clamp01(o.y),
-        text: typeof o.text === 'string' ? o.text.slice(0, 2000) : '',
-        fontSize: Math.min(96, Math.max(6, typeof o.fontSize === 'number' ? o.fontSize : 14)),
-        color: typeof o.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(o.color) ? o.color : '#111827',
-      })
-    } else if (o.kind === 'signature') {
-      if (typeof o.dataUrl !== 'string' || !o.dataUrl.startsWith('data:image/png')) return null
-      if (o.dataUrl.length > 2_500_000) return null
-      items.push({
-        id,
-        kind: 'signature',
-        page,
-        x: clamp01(o.x),
-        y: clamp01(o.y),
-        w: clamp01(o.w, 0.25),
-        aspect: typeof o.aspect === 'number' && o.aspect > 0 ? Math.min(5, o.aspect) : 0.4,
-        dataUrl: o.dataUrl,
-      })
-    } else if (o.kind === 'highlight' || o.kind === 'blackout') {
-      items.push({
-        id,
-        kind: o.kind,
-        page,
-        x: clamp01(o.x),
-        y: clamp01(o.y),
-        w: clamp01(o.w),
-        h: clamp01(o.h),
-      })
+  for (const rawItem of raw) {
+    if (!rawItem || typeof rawItem !== 'object') return null
+    const it = rawItem as Record<string, unknown>
+    const id = typeof it.id === 'string' && it.id ? it.id : crypto.randomUUID()
+    const page = typeof it.page === 'number' && Number.isInteger(it.page) && it.page >= 0 ? it.page : 0
+    const x = clamp01(it.x)
+    const y = clamp01(it.y)
+
+    if (it.kind === 'text') {
+      const text = typeof it.text === 'string' ? it.text : ''
+      const fontSize = typeof it.fontSize === 'number' && it.fontSize > 0 ? it.fontSize : 14
+      const color = typeof it.color === 'string' && /^#[0-9a-f]{6}$/i.test(it.color) ? it.color : '#111827'
+      items.push({ id, kind: 'text', page, x, y, text, fontSize, color })
+    } else if (it.kind === 'signature') {
+      const w = clamp01(it.w, 0.25)
+      const h = typeof it.h === 'number' && Number.isFinite(it.h) && it.h > 0 ? clamp01(it.h) : undefined
+      const aspect = typeof it.aspect === 'number' && it.aspect > 0 ? it.aspect : 0.4
+      const dataUrl = typeof it.dataUrl === 'string' && it.dataUrl.startsWith('data:image/') ? it.dataUrl : ''
+      if (!dataUrl) return null
+      items.push({ id, kind: 'signature', page, x, y, w, ...(h !== undefined ? { h } : {}), aspect, dataUrl })
+    } else if (it.kind === 'highlight' || it.kind === 'blackout') {
+      const w = clamp01(it.w, 0.1)
+      const h = clamp01(it.h, 0.05)
+      const color =
+        it.kind === 'highlight' && typeof it.color === 'string' && /^#[0-9a-f]{6}$/i.test(it.color)
+          ? it.color
+          : undefined
+      items.push({ id, kind: it.kind, page, x, y, w, h, ...(color ? { color } : {}) })
     } else {
       return null
     }
@@ -76,7 +72,36 @@ function parseItems(raw: unknown): PdfEditItem[] | null {
   return items
 }
 
-/** POST /api/documents/[id]/pdf-save — apply edit items onto the ORIGINAL pdf and persist the flattened result. */
+function parsePageOps(raw: unknown): PageOps | null {
+  if (!raw || typeof raw !== 'object') return null
+  const it = raw as Record<string, unknown>
+  if (!Array.isArray(it.order) || it.order.length === 0 || it.order.length > 2000) return null
+  const order: number[] = []
+  for (const n of it.order) {
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) return null
+    order.push(n)
+  }
+  const rotations: Record<number, number> = {}
+  if (it.rotations && typeof it.rotations === 'object') {
+    for (const [k, v] of Object.entries(it.rotations)) {
+      const idx = parseInt(k, 10)
+      if (Number.isInteger(idx) && typeof v === 'number' && Number.isFinite(v)) {
+        rotations[idx] = ((v % 360) + 360) % 360
+      }
+    }
+  }
+  return { order, rotations }
+}
+
+/**
+ * POST /api/documents/[id]/pdf-save
+ * Body: { items: PdfEditItem[], pageOps?: PageOps }
+ * Reads the pristine uploaded PDF (so edits never double-bake), applies page
+ * reorganizations (order, rotations, deletions), burns all text,
+ * signatures and highlights into it via pdf-lib, then applies blackout boxes as
+ * true redactions (see applyRedactions), writes the resulting file to disk, and
+ * stores the serialized edits in the database row for re-editing.
+ */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -90,7 +115,7 @@ export async function POST(
     return NextResponse.json({ error: 'Not a PDF document' }, { status: 400 })
   }
 
-  let body: { items?: unknown }
+  let body: { items?: unknown; pageOps?: unknown }
   try {
     body = await req.json()
   } catch {
@@ -100,12 +125,83 @@ export async function POST(
   if (items === null) {
     return NextResponse.json({ error: 'Invalid edit items' }, { status: 400 })
   }
+  const pageOps = body.pageOps ? parsePageOps(body.pageOps) : null
 
   try {
-    const original = await readFile(doc.originalPath)
-    const pdf = await PDFDocument.load(original)
+    const resolvedFilePath = resolveDocumentFilePath(doc)
+    let sourcePath = resolveDocumentOriginalPath(doc)
+    const origTarget = originalDocFilePath(doc.id, doc.type)
+
+    // Ensure pristine original exists
+    if (!existsSync(origTarget) && existsSync(sourcePath)) {
+      try {
+        await copyFile(sourcePath, origTarget)
+        sourcePath = origTarget
+        await db.document.update({
+          where: { id },
+          data: { originalPath: origTarget, filePath: resolvedFilePath },
+        })
+      } catch (err) {
+        console.warn('Could not initialize originalPath backup', err)
+      }
+    }
+
+    const original = await readFile(sourcePath)
+    const sourcePdf = await PDFDocument.load(original)
+    const sourceNumPages = sourcePdf.getPageCount()
+
+    let pdf: PDFDocument
+    if (pageOps && pageOps.order.length > 0) {
+      const valid = pageOps.order.every((idx) => idx >= 0 && idx < sourceNumPages)
+      if (!valid) {
+        return NextResponse.json({ error: 'Invalid page operations indices' }, { status: 400 })
+      }
+      pdf = await PDFDocument.create()
+      for (let i = 0; i < pageOps.order.length; i++) {
+        const origIdx = pageOps.order[i]
+        const addRot = pageOps.rotations?.[i] ?? 0
+        const srcPage = sourcePdf.getPage(origIdx)
+        const srcRot = ((srcPage.getRotation().angle % 360) + 360) % 360
+        const totalRot = ((srcRot + addRot) % 360 + 360) % 360
+
+        if (totalRot === 0) {
+          const [copied] = await pdf.copyPages(sourcePdf, [origIdx])
+          copied.setRotation(degrees(0))
+          pdf.addPage(copied)
+        } else {
+          const [embedded] = await pdf.embedPages([srcPage])
+          const origW = srcPage.getWidth()
+          const origH = srcPage.getHeight()
+          let newW = origW
+          let newH = origH
+          let drawOpts: { x: number; y: number; rotate: ReturnType<typeof degrees> }
+
+          if (totalRot === 90) {
+            newW = origH
+            newH = origW
+            drawOpts = { x: 0, y: newH, rotate: degrees(-90) }
+          } else if (totalRot === 180) {
+            newW = origW
+            newH = origH
+            drawOpts = { x: newW, y: newH, rotate: degrees(-180) }
+          } else {
+            // 270 deg CW
+            newW = origH
+            newH = origW
+            drawOpts = { x: newW, y: 0, rotate: degrees(-270) }
+          }
+          const newPage = pdf.addPage([newW, newH])
+          newPage.drawPage(embedded, drawOpts)
+        }
+      }
+    } else {
+      pdf = sourcePdf
+    }
+
     const font = await pdf.embedFont(StandardFonts.Helvetica)
+    const symbolFont = await pdf.embedFont(StandardFonts.ZapfDingbats)
     const pages = pdf.getPages()
+    const redactions = new Map<number, RedactionBox[]>()
 
     // Embed each distinct signature PNG only once.
     const imageCache = new Map<string, PDFImage>()
@@ -126,10 +222,10 @@ export async function POST(
 
       if (item.kind === 'text') {
         const { r, g, b } = hexToRgb(item.color)
-        const lines = sanitizeWinAnsi(item.text).split('\n')
+        const lines = item.text.split('\n')
         for (let i = 0; i < lines.length; i++) {
           if (!lines[i]) continue
-          page.drawText(lines[i], {
+          drawTextLine(page, lines[i], {
             x: item.x * pw,
             y:
               ph -
@@ -137,14 +233,14 @@ export async function POST(
               BASELINE_OFFSET * item.fontSize -
               i * item.fontSize * TEXT_LINE_HEIGHT,
             size: item.fontSize,
-            font,
             color: rgb(r, g, b),
+            fonts: { text: font, symbol: symbolFont },
           })
         }
       } else if (item.kind === 'signature') {
         const img = await embed(item.dataUrl)
         const w = item.w * pw
-        const h = w * item.aspect
+        const h = typeof item.h === 'number' && item.h > 0 ? item.h * ph : w * item.aspect
         page.drawImage(img, {
           x: item.x * pw,
           y: ph - item.y * ph - h,
@@ -152,34 +248,34 @@ export async function POST(
           height: h,
         })
       } else if (item.kind === 'highlight') {
+        const { r, g, b } = item.color ? hexToRgb(item.color) : { r: 1, g: 0.87, b: 0.34 }
         page.drawRectangle({
           x: item.x * pw,
           y: ph - (item.y + item.h) * ph,
           width: item.w * pw,
           height: item.h * ph,
-          color: rgb(1, 0.87, 0.34),
+          color: rgb(r, g, b),
           opacity: 0.45,
           blendMode: BlendMode.Multiply,
         })
       } else {
-        page.drawRectangle({
-          x: item.x * pw,
-          y: ph - (item.y + item.h) * ph,
-          width: item.w * pw,
-          height: item.h * ph,
-          color: rgb(0.07, 0.07, 0.09),
-          opacity: 1,
-        })
+        // Blackout: collected here and applied after all other edits, so it also
+        // covers any text/signature placed beneath it.
+        const boxes = redactions.get(item.page) ?? []
+        boxes.push({ x: item.x, y: item.y, w: item.w, h: item.h })
+        redactions.set(item.page, boxes)
       }
     }
 
-    const out = await pdf.save()
-    await writeFile(doc.filePath, out)
+    const out = await applyRedactions(await pdf.save(), redactions)
+    await writeFile(resolvedFilePath, out)
+    const editsData = pageOps ? { items, pageOps } : items
     const updated = await db.document.update({
       where: { id },
       data: {
-        edits: JSON.stringify(items),
+        edits: JSON.stringify(editsData),
         size: out.byteLength,
+        filePath: resolvedFilePath,
       },
     })
     return NextResponse.json({ ok: true, document: documentToDto(updated) })

@@ -162,6 +162,25 @@ function styleAlign(el: HTMLElement): Alignment | undefined {
   }
 }
 
+/** Read margin-left or padding-left in px from inline style and convert to twips (1px = 15 twips). */
+function styleIndentLeftTwips(el: HTMLElement): number {
+  let totalPx = 0
+  const checkStyle = (s: string) => {
+    const ml = /margin-left\s*:\s*([0-9.]+)px/i.exec(s)
+    if (ml) totalPx += parseFloat(ml[1]) || 0
+    const pl = /padding-left\s*:\s*([0-9.]+)px/i.exec(s)
+    if (pl) totalPx += parseFloat(pl[1]) || 0
+  }
+  checkStyle(el.getAttribute('style') ?? '')
+  // Also check if first child is a wrapper span or img with margin-left
+  for (const child of el.childNodes) {
+    if (elementNode(child)) {
+      checkStyle(child.getAttribute('style') ?? '')
+    }
+  }
+  return Math.max(0, Math.round(totalPx * 15))
+}
+
 function buildTextRun(text: string, fmt: RunFormat): TextRun {
   return new TextRun({
     text,
@@ -189,24 +208,68 @@ function docxImageType(buffer: Buffer, mime: string): DocxImageType {
   return 'png'
 }
 
-/** Dimensions scaled to at most MAX_IMAGE_WIDTH px, keeping aspect ratio. */
-function scaledImageSize(buffer: Buffer): { width: number; height: number } {
+/** Read target width (in px) from el attributes or style if specified. */
+function parseImageWidth(el: HTMLElement): number | null {
+  const widthAttr = el.getAttribute('width')
+  if (widthAttr) {
+    const num = parseFloat(widthAttr)
+    if (Number.isFinite(num) && num > 0) return num
+  }
+  const style = el.getAttribute('style') ?? ''
+  const m = /(?:^|;)\s*width\s*:\s*([0-9.]+)(?:px)?/i.exec(style)
+  if (m) {
+    const num = parseFloat(m[1])
+    if (Number.isFinite(num) && num > 0) return num
+  }
+  return null
+}
+
+/** Read target height (in px) from el attributes or style if specified. */
+function parseImageHeight(el: HTMLElement): number | null {
+  const heightAttr = el.getAttribute('height')
+  if (heightAttr) {
+    const num = parseFloat(heightAttr)
+    if (Number.isFinite(num) && num > 0) return num
+  }
+  const style = el.getAttribute('style') ?? ''
+  const m = /(?:^|;)\s*height\s*:\s*([0-9.]+)(?:px)?/i.exec(style)
+  if (m) {
+    const num = parseFloat(m[1])
+    if (Number.isFinite(num) && num > 0) return num
+  }
+  return null
+}
+
+/** Dimensions scaled to target width/height or at most MAX_IMAGE_WIDTH px. */
+function scaledImageSize(
+  buffer: Buffer,
+  targetWidth?: number | null,
+  targetHeight?: number | null,
+): { width: number; height: number } {
   try {
     const dim = imageSize(buffer)
     if (
       dim.width > 0 && dim.height > 0 &&
       Number.isFinite(dim.width) && Number.isFinite(dim.height)
     ) {
-      if (dim.width <= MAX_IMAGE_WIDTH) {
-        return { width: Math.round(dim.width), height: Math.round(dim.height) }
-      }
-      const scale = MAX_IMAGE_WIDTH / dim.width
-      return { width: MAX_IMAGE_WIDTH, height: Math.round(dim.height * scale) }
+      const aspect = dim.height / dim.width
+      const baseW = targetWidth && targetWidth > 0 ? targetWidth : dim.width
+      const w = Math.min(Math.round(baseW), MAX_IMAGE_WIDTH)
+      const h =
+        targetHeight && targetHeight > 0
+          ? Math.max(15, Math.min(800, Math.round(targetHeight)))
+          : Math.max(10, Math.round(w * aspect))
+      return { width: Math.max(20, w), height: h }
     }
   } catch {
     // Fall through to default size.
   }
-  return { width: DEFAULT_IMAGE_WIDTH, height: DEFAULT_IMAGE_HEIGHT }
+  const baseW = targetWidth && targetWidth > 0 ? Math.min(Math.round(targetWidth), MAX_IMAGE_WIDTH) : DEFAULT_IMAGE_WIDTH
+  const baseH =
+    targetHeight && targetHeight > 0
+      ? Math.max(15, Math.min(800, Math.round(targetHeight)))
+      : Math.round(baseW * (DEFAULT_IMAGE_HEIGHT / DEFAULT_IMAGE_WIDTH))
+  return { width: baseW, height: baseH }
 }
 
 /** Build an ImageRun from an <img> with a base64 data URL; null if undecodable. */
@@ -217,10 +280,12 @@ function buildImageRun(el: HTMLElement): ImageRun | null {
     if (!m) return null
     const buffer = Buffer.from(m[2], 'base64')
     if (buffer.length === 0) return null
+    const customWidth = parseImageWidth(el)
+    const customHeight = parseImageHeight(el)
     return new ImageRun({
       type: docxImageType(buffer, `image/${m[1]}`),
       data: buffer,
-      transformation: scaledImageSize(buffer),
+      transformation: scaledImageSize(buffer, customWidth, customHeight),
     })
   } catch {
     return null
@@ -292,8 +357,11 @@ function paragraphAlign(ctx: BlockContext, el?: HTMLElement): Alignment | undefi
   return (el ? styleAlign(el) : undefined) ?? ctx.align
 }
 
-function quoteIndent(ctx: BlockContext): { left: number } | undefined {
-  return ctx.quote ? { left: QUOTE_INDENT_TWIPS } : undefined
+function quoteIndent(ctx: BlockContext, el?: HTMLElement): { left: number } | undefined {
+  const base = ctx.quote ? QUOTE_INDENT_TWIPS : 0
+  const extra = el ? styleIndentLeftTwips(el) : 0
+  const total = base + extra
+  return total > 0 ? { left: total } : undefined
 }
 
 function convertListItem(
@@ -544,7 +612,7 @@ function convertBlocks(
         out.push(new Paragraph({
           children: runs,
           alignment: paragraphAlign(ctx, el),
-          indent: quoteIndent(ctx),
+          indent: quoteIndent(ctx, el),
         }))
       } else if (tag === 'blockquote') {
         out.push(...convertBlocks(el.childNodes, {
@@ -596,7 +664,7 @@ function convertBlocks(
             out.push(new Paragraph({
               children: runs,
               alignment: paragraphAlign(ctx, el),
-              indent: quoteIndent(ctx),
+              indent: quoteIndent(ctx, el),
             }))
           }
         }

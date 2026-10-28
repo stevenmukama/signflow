@@ -1,16 +1,20 @@
 'use client'
 
 import dynamic from 'next/dynamic'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTheme } from 'next-themes'
 import {
+  Download,
   FileText,
   FileType,
+  Layers,
   Loader2,
   Moon,
+  Pencil,
   PenLine,
   PenTool,
   Plus,
+  Search,
   Trash2,
   UploadCloud,
   Sun,
@@ -19,7 +23,27 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import SignatureModal from '@/components/signature-modal'
+import MergeModal from '@/components/merge-modal'
 import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { formatBytes } from '@/lib/documents'
@@ -56,6 +80,21 @@ export default function Home() {
   const [uploading, setUploading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [sigModalOpen, setSigModalOpen] = useState(false)
+  const [mergeModalOpen, setMergeModalOpen] = useState(false)
+  const [initialMergeIds, setInitialMergeIds] = useState<string[]>([])
+
+  // Search & Filter state
+  const [searchQuery, setSearchQuery] = useState('')
+  const [typeFilter, setTypeFilter] = useState<'all' | 'pdf' | 'docx'>('all')
+
+  // Renaming state
+  const [docToRename, setDocToRename] = useState<DocumentDto | null>(null)
+  const [newDocName, setNewDocName] = useState('')
+  const [renaming, setRenaming] = useState(false)
+
+  // Deletion confirm state
+  const [docToDelete, setDocToDelete] = useState<DocumentDto | null>(null)
+
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const { resolvedTheme, setTheme } = useTheme()
@@ -124,11 +163,37 @@ export default function Home() {
     if (file) void handleFile(file)
   }
 
-  const deleteDoc = async (doc: DocumentDto) => {
-    if (!window.confirm(`Delete “${doc.name}” permanently?`)) return
-    const res = await fetch(`/api/documents/${doc.id}`, { method: 'DELETE' })
+  const handleRename = async () => {
+    if (!docToRename) return
+    const trimmed = newDocName.trim()
+    if (!trimmed || trimmed === docToRename.name) {
+      setDocToRename(null)
+      return
+    }
+    setRenaming(true)
+    try {
+      const res = await fetch(`/api/documents/${docToRename.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      })
+      if (!res.ok) throw new Error('Rename failed')
+      toast({ title: 'Document renamed' })
+      setDocToRename(null)
+      void loadDocs()
+    } catch {
+      toast({ title: 'Could not rename document', variant: 'destructive' })
+    } finally {
+      setRenaming(false)
+    }
+  }
+
+  const confirmDelete = async () => {
+    if (!docToDelete) return
+    const res = await fetch(`/api/documents/${docToDelete.id}`, { method: 'DELETE' })
     if (res.ok) {
       toast({ title: 'Document deleted' })
+      setDocToDelete(null)
       void loadDocs()
     } else {
       toast({ title: 'Could not delete the document', variant: 'destructive' })
@@ -141,6 +206,15 @@ export default function Home() {
       setSigs((prev) => prev.filter((s) => s.id !== sig.id))
     }
   }
+
+  // Filtered documents
+  const filteredDocs = useMemo(() => {
+    return docs.filter((doc) => {
+      const matchesType = typeFilter === 'all' || doc.type === typeFilter
+      const matchesSearch = doc.name.toLowerCase().includes(searchQuery.toLowerCase())
+      return matchesType && matchesSearch
+    })
+  }, [docs, typeFilter, searchQuery])
 
   // ------------------------------------------------------------- editor views
   if (view.mode === 'pdf') {
@@ -204,9 +278,15 @@ export default function Home() {
             Upload a PDF or Word file — add text, highlights, redactions and your signature, then download the finished document.
           </p>
           <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-xs text-muted-foreground">
-            <Badge variant="outline" className="gap-1.5 py-1.5"><FileText className="size-3.5 text-rose-600" /> PDF editor & signer</Badge>
-            <Badge variant="outline" className="gap-1.5 py-1.5"><FileType className="size-3.5 text-emerald-600" /> Word (.docx) editor & signer</Badge>
-            <Badge variant="outline" className="gap-1.5 py-1.5"><PenTool className="size-3.5 text-emerald-600" /> Draw, type or upload signatures</Badge>
+            <Badge variant="outline" className="gap-1.5 py-1.5">
+              <FileText className="size-3.5 text-rose-600" /> PDF editor & signer
+            </Badge>
+            <Badge variant="outline" className="gap-1.5 py-1.5">
+              <FileType className="size-3.5 text-emerald-600" /> Word (.docx) editor & signer
+            </Badge>
+            <Badge variant="outline" className="gap-1.5 py-1.5">
+              <PenTool className="size-3.5 text-emerald-600" /> Draw, type or upload signatures
+            </Badge>
           </div>
         </section>
 
@@ -308,21 +388,73 @@ export default function Home() {
 
         {/* documents */}
         <section aria-label="Your documents" className="mt-8">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Your documents</h2>
-            <span className="text-xs text-muted-foreground">{docs.length} file{docs.length === 1 ? '' : 's'}</span>
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-semibold">Your documents</h2>
+              <Badge variant="secondary" className="font-mono text-xs">
+                {filteredDocs.length}
+              </Badge>
+            </div>
+
+            {/* Filter and Search controls */}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-9 gap-1.5 border-emerald-600/30 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800 dark:border-emerald-500/30 dark:text-emerald-400 dark:hover:bg-emerald-950"
+                onClick={() => {
+                  setInitialMergeIds([])
+                  setMergeModalOpen(true)
+                }}
+              >
+                <Layers className="size-4 text-emerald-600 dark:text-emerald-400" />
+                Merge PDFs
+              </Button>
+
+              <div className="relative">
+                <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
+                <Input
+                  type="text"
+                  placeholder="Search documents…"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="h-9 w-44 pl-8 sm:w-56 text-sm"
+                />
+              </div>
+
+              <div className="flex items-center rounded-lg border bg-muted/40 p-0.5">
+                {(['all', 'pdf', 'docx'] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setTypeFilter(t)}
+                    className={cn(
+                      'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                      typeFilter === t
+                        ? 'bg-background text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    {t === 'all' ? 'All' : t.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
+
           {loadingDocs ? (
             <div className="flex h-32 items-center justify-center">
               <Loader2 className="size-6 animate-spin text-muted-foreground" />
             </div>
-          ) : docs.length === 0 ? (
+          ) : filteredDocs.length === 0 ? (
             <div className="rounded-2xl border bg-muted/30 p-10 text-center text-sm text-muted-foreground">
-              No documents yet — upload your first PDF or Word file above.
+              {docs.length === 0
+                ? 'No documents yet — upload your first PDF or Word file above.'
+                : 'No documents match your search or filter.'}
             </div>
           ) : (
             <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {docs.map((doc) => (
+              {filteredDocs.map((doc) => (
                 <li key={doc.id}>
                   <Card className="flex h-full flex-col py-4 transition-shadow hover:shadow-md">
                     <CardContent className="flex flex-1 flex-col gap-3 px-4">
@@ -330,15 +462,30 @@ export default function Home() {
                         <span
                           className={cn(
                             'flex size-10 shrink-0 items-center justify-center rounded-lg',
-                            doc.type === 'pdf' ? 'bg-rose-50 text-rose-600 dark:bg-rose-950' : 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950',
+                            doc.type === 'pdf'
+                              ? 'bg-rose-50 text-rose-600 dark:bg-rose-950'
+                              : 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950',
                           )}
                         >
                           {doc.type === 'pdf' ? <FileText className="size-5" /> : <FileType className="size-5" />}
                         </span>
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-semibold" title={doc.name}>
-                            {doc.name}
-                          </p>
+                          <div className="flex items-center gap-1 group">
+                            <p className="truncate text-sm font-semibold" title={doc.name}>
+                              {doc.name}
+                            </p>
+                            <button
+                              type="button"
+                              aria-label={`Rename ${doc.name}`}
+                              className="size-5 rounded opacity-0 transition-opacity hover:text-emerald-600 group-hover:opacity-100"
+                              onClick={() => {
+                                setDocToRename(doc)
+                                setNewDocName(doc.name)
+                              }}
+                            >
+                              <Pencil className="size-3" />
+                            </button>
+                          </div>
                           <p className="text-xs text-muted-foreground">
                             {formatBytes(doc.size)} · updated {new Date(doc.updatedAt).toLocaleDateString()}
                           </p>
@@ -351,7 +498,9 @@ export default function Home() {
                           </Badge>
                         )}
                         {doc.hasEdits && !doc.signed && <Badge variant="secondary">Edited</Badge>}
-                        <Badge variant="outline" className="uppercase">{doc.type}</Badge>
+                        <Badge variant="outline" className="uppercase">
+                          {doc.type}
+                        </Badge>
                       </div>
                       <div className="mt-auto flex items-center gap-2 pt-1">
                         <Button
@@ -362,9 +511,24 @@ export default function Home() {
                           <PenLine className="size-4" />
                           {doc.type === 'pdf' ? 'Edit / Sign' : 'Edit'}
                         </Button>
+                        {doc.type === 'pdf' && (
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            className="size-10 text-muted-foreground hover:text-emerald-600 hover:border-emerald-600/50"
+                            title={`Merge ${doc.name} with another PDF`}
+                            aria-label={`Merge ${doc.name}`}
+                            onClick={() => {
+                              setInitialMergeIds([doc.id])
+                              setMergeModalOpen(true)
+                            }}
+                          >
+                            <Layers className="size-4" />
+                          </Button>
+                        )}
                         <Button variant="outline" size="icon" className="size-10" asChild>
                           <a href={`/api/documents/${doc.id}/download`} aria-label={`Download ${doc.name}`}>
-                            <UploadCloud className="size-4 rotate-180" />
+                            <Download className="size-4" />
                           </a>
                         </Button>
                         <Button
@@ -372,7 +536,7 @@ export default function Home() {
                           size="icon"
                           className="size-10 text-muted-foreground hover:text-destructive"
                           aria-label={`Delete ${doc.name}`}
-                          onClick={() => void deleteDoc(doc)}
+                          onClick={() => setDocToDelete(doc)}
                         >
                           <Trash2 className="size-4" />
                         </Button>
@@ -396,12 +560,86 @@ export default function Home() {
         </div>
       </footer>
 
+      {/* Rename Dialog */}
+      <Dialog
+        open={Boolean(docToRename)}
+        onOpenChange={(open) => {
+          if (!open) setDocToRename(null)
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename document</DialogTitle>
+            <DialogDescription>Enter a new name for your document.</DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            <Input
+              value={newDocName}
+              onChange={(e) => setNewDocName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void handleRename()
+              }}
+              placeholder="Document name"
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDocToRename(null)}>
+              Cancel
+            </Button>
+            <Button onClick={handleRename} disabled={renaming}>
+              {renaming ? <Loader2 className="size-4 animate-spin" /> : 'Rename'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation Alert Dialog */}
+      <AlertDialog
+        open={Boolean(docToDelete)}
+        onOpenChange={(open) => {
+          if (!open) setDocToDelete(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete document</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to permanently delete &ldquo;{docToDelete?.name}&rdquo;? This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDelete}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <SignatureModal
         open={sigModalOpen}
         onOpenChange={setSigModalOpen}
         onSelect={() => {
-          setSigModalOpen(false)
           void loadSigs()
+          setSigModalOpen(false)
+        }}
+      />
+
+      <MergeModal
+        open={mergeModalOpen}
+        onOpenChange={setMergeModalOpen}
+        documents={docs}
+        initialSelectedIds={initialMergeIds}
+        onMerged={(mergedDoc) => {
+          void loadDocs()
+          setView({ mode: 'pdf', doc: mergedDoc })
+        }}
+        onUploadFile={async (file) => {
+          await handleFile(file)
         }}
       />
     </div>

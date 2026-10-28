@@ -1,11 +1,11 @@
-import { writeFile } from 'fs/promises'
+import { writeFile, copyFile } from 'fs/promises'
 import path from 'path'
 import { randomUUID } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 
 import { db } from '@/lib/db'
 import { documentToDto } from '@/lib/documents'
-import { DOCUMENTS_DIR, docFilePath, ensureDocumentsDir } from '@/lib/storage'
+import { docFilePath, originalDocFilePath, ensureDocumentsDir } from '@/lib/storage'
 
 export const runtime = 'nodejs'
 
@@ -54,17 +54,19 @@ export async function POST(req: NextRequest) {
 
   await ensureDocumentsDir()
   const id = randomUUID()
+  const originalPath = originalDocFilePath(id, type)
   const filePath = docFilePath(id, type)
   try {
     const bytes = Buffer.from(await file.arrayBuffer())
-    await writeFile(filePath, bytes)
+    await writeFile(originalPath, bytes)
+    await copyFile(originalPath, filePath)
     const row = await db.document.create({
       data: {
         id,
         name: path.basename(file.name).slice(0, 180) || `document.${type}`,
         type,
         size: file.size,
-        originalPath: filePath,
+        originalPath,
         filePath,
       },
     })

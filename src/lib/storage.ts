@@ -1,3 +1,4 @@
+import { existsSync } from 'fs'
 import { mkdir } from 'fs/promises'
 import path from 'path'
 
@@ -10,6 +11,59 @@ export async function ensureDocumentsDir(): Promise<void> {
 
 export function docFilePath(id: string, ext: string): string {
   return path.join(DOCUMENTS_DIR, `${id}.${ext}`)
+}
+
+export function originalDocFilePath(id: string, ext: string): string {
+  return path.join(DOCUMENTS_DIR, `${id}.orig.${ext}`)
+}
+
+/**
+ * Resolves the active/processed file path for a document on disk.
+ * Handles paths created on other environments (e.g. /home/z/my-project/...)
+ * by looking up the file relative to the local DOCUMENTS_DIR.
+ */
+export function resolveDocumentFilePath(doc: {
+  id: string
+  type: string
+  filePath?: string | null
+}): string {
+  if (doc.filePath && existsSync(doc.filePath)) {
+    return doc.filePath
+  }
+  if (doc.filePath) {
+    const filename = path.basename(doc.filePath)
+    const localPath = path.join(DOCUMENTS_DIR, filename)
+    if (existsSync(localPath)) return localPath
+  }
+  return docFilePath(doc.id, doc.type)
+}
+
+/**
+ * Resolves the original uploaded file path for a document on disk.
+ * Falls back to active file path if no .orig file exists yet.
+ */
+export function resolveDocumentOriginalPath(doc: {
+  id: string
+  type: string
+  originalPath?: string | null
+  filePath?: string | null
+}): string {
+  if (doc.originalPath && existsSync(doc.originalPath)) {
+    return doc.originalPath
+  }
+  if (doc.originalPath) {
+    const filename = path.basename(doc.originalPath)
+    const localPath = path.join(DOCUMENTS_DIR, filename)
+    if (existsSync(localPath)) return localPath
+  }
+  const canonicalOrig = originalDocFilePath(doc.id, doc.type)
+  if (existsSync(canonicalOrig)) return canonicalOrig
+
+  // Fallback to active file path if original was not split
+  const activePath = resolveDocumentFilePath(doc)
+  if (existsSync(activePath)) return activePath
+
+  return canonicalOrig
 }
 
 export const DOCX_MIME =
@@ -33,15 +87,20 @@ const WINANSI_EXTRA = new Set(
   ],
 )
 
+/** True if `ch` (a single code point) can be drawn with pdf-lib's WinAnsi standard fonts. */
+export function isWinAnsiChar(ch: string): boolean {
+  const code = ch.codePointAt(0) ?? 0
+  return (
+    (code >= 0x20 && code <= 0x7e) ||
+    (code >= 0xa0 && code <= 0xff) ||
+    WINANSI_EXTRA.has(ch)
+  )
+}
+
 export function sanitizeWinAnsi(text: string): string {
   let out = ''
   for (const ch of text.replace(/\t/g, '    ')) {
-    const code = ch.codePointAt(0) ?? 0
-    const ok =
-      (code >= 0x20 && code <= 0x7e) ||
-      (code >= 0xa0 && code <= 0xff) ||
-      WINANSI_EXTRA.has(ch)
-    out += ok ? ch : '?'
+    out += isWinAnsiChar(ch) ? ch : '?'
   }
   return out
 }

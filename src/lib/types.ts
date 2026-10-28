@@ -11,9 +11,16 @@ export interface DocumentDto {
   updatedAt: string
 }
 
+export interface PageOps {
+  /** 0-based original page indices in target order. Omitted indices mean deleted pages. */
+  order: number[]
+  /** Additional rotation in degrees (0, 90, 180, 270) keyed by 0-based index in the new page sequence. */
+  rotations?: Record<number, number>
+}
+
 export interface DocumentDetail extends DocumentDto {
-  /** PDF: parsed PdfEditItem[] — DOCX: edited HTML string */
-  edits: string | PdfEditItem[] | null
+  /** PDF: parsed PdfEditItem[] or { items: PdfEditItem[]; pageOps?: PageOps } — DOCX: edited HTML string */
+  edits: string | PdfEditItem[] | { items: PdfEditItem[]; pageOps?: PageOps } | null
 }
 
 export interface SavedSignature {
@@ -47,6 +54,7 @@ export type PdfEditItem =
       x: number // fraction of page width (left)
       y: number // fraction of page height (top)
       w: number // fraction of page width (width of image)
+      h?: number // optional fraction of page height (height of image)
       aspect: number // image height / width ratio
       dataUrl: string // PNG data URL (transparent)
     }
@@ -58,6 +66,14 @@ export type PdfEditItem =
       y: number
       w: number
       h: number // fractions of page width/height
+      color?: string // optional custom highlight color
     }
 
-export type PdfTool = 'select' | 'text' | 'highlight' | 'blackout' | 'signature'
+export type PdfTool =
+  | 'select'
+  | 'text'
+  | 'date'
+  | 'check'
+  | 'highlight'
+  | 'blackout'
+  | 'signature'

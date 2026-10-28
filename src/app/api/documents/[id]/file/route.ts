@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 
 import { db } from '@/lib/db'
 import { serveFile } from '@/lib/serve-file'
-import { mimeForType } from '@/lib/storage'
+import { mimeForType, resolveDocumentFilePath } from '@/lib/storage'
 
 export const runtime = 'nodejs'
 
@@ -16,7 +16,8 @@ export async function GET(
   if (!doc) {
     return NextResponse.json({ error: 'Document not found' }, { status: 404 })
   }
-  return serveFile(doc.filePath, mimeForType(doc.type), {
+  const filePath = resolveDocumentFilePath(doc)
+  return serveFile(filePath, mimeForType(doc.type), {
     downloadName: doc.name,
   })
 }

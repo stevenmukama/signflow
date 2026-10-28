@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { db } from '@/lib/db'
 import { htmlToDocxBuffer } from '@/lib/docx-converter'
+import { sanitizeDocxHtml } from '@/lib/html-sanitizer'
+import { resolveDocumentFilePath } from '@/lib/storage'
 
 export const runtime = 'nodejs'
 
@@ -39,11 +41,14 @@ export async function POST(
       )
     }
 
-    const buffer = await htmlToDocxBuffer(parsed.data.html)
-    await writeFile(doc.filePath, buffer)
+    const targetPath = resolveDocumentFilePath(doc)
+    // Never persist untrusted markup: this HTML is later injected into the editor.
+    const html = sanitizeDocxHtml(parsed.data.html)
+    const buffer = await htmlToDocxBuffer(html)
+    await writeFile(targetPath, buffer)
     await db.document.update({
       where: { id },
-      data: { edits: parsed.data.html, size: buffer.byteLength },
+      data: { edits: html, size: buffer.byteLength, filePath: targetPath },
     })
 
     return NextResponse.json({ ok: true })

@@ -1,5 +1,5 @@
 import type { Document as DocumentRow } from '@prisma/client'
-import type { DocumentDto, PdfEditItem } from '@/lib/types'
+import type { DocumentDetail, DocumentDto, PageOps, PdfEditItem } from '@/lib/types'
 
 /** Map a Prisma Document row to the public DTO used by the frontend. */
 export function documentToDto(d: DocumentRow): DocumentDto {
@@ -24,15 +24,19 @@ export function documentToDto(d: DocumentRow): DocumentDto {
   }
 }
 
-/** Parse the stored `edits` column: PDF → PdfEditItem[], DOCX → HTML string. */
+/** Parse the stored `edits` column: PDF → PdfEditItem[] | { items: PdfEditItem[]; pageOps?: PageOps }, DOCX → HTML string. */
 export function parseEdits(
   d: DocumentRow,
-): string | PdfEditItem[] | null {
+): DocumentDetail['edits'] {
   if (!d.edits) return null
   if (d.type === 'docx') return d.edits
   try {
     const parsed = JSON.parse(d.edits)
-    return Array.isArray(parsed) ? (parsed as PdfEditItem[]) : null
+    if (Array.isArray(parsed)) return parsed as PdfEditItem[]
+    if (parsed && typeof parsed === 'object' && Array.isArray(parsed.items)) {
+      return parsed as { items: PdfEditItem[]; pageOps?: PageOps }
+    }
+    return null
   } catch {
     return null
   }

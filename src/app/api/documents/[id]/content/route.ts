@@ -2,6 +2,8 @@ import { readFile } from 'fs/promises'
 import { NextRequest, NextResponse } from 'next/server'
 import mammoth from 'mammoth'
 import { db } from '@/lib/db'
+import { sanitizeDocxHtml } from '@/lib/html-sanitizer'
+import { resolveDocumentOriginalPath } from '@/lib/storage'
 
 export const runtime = 'nodejs'
 
@@ -24,11 +26,13 @@ export async function GET(
     }
 
     // Previously saved edited HTML wins over a fresh conversion.
+    // Sanitized on read as well, so rows stored before sanitization existed are safe.
     if (typeof doc.edits === 'string' && doc.edits.length > 0) {
-      return NextResponse.json({ html: doc.edits })
+      return NextResponse.json({ html: sanitizeDocxHtml(doc.edits) })
     }
 
-    const buffer = await readFile(doc.originalPath)
+    const sourcePath = resolveDocumentOriginalPath(doc)
+    const buffer = await readFile(sourcePath)
     const result = await mammoth.convertToHtml(
       { buffer },
       {
@@ -37,7 +41,8 @@ export async function GET(
         })),
       },
     )
-    return NextResponse.json({ html: result.value })
+    // A crafted .docx can carry e.g. javascript: hyperlinks through mammoth.
+    return NextResponse.json({ html: sanitizeDocxHtml(result.value) })
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Failed to load document content' },

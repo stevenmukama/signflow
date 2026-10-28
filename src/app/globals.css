@@ -197,6 +197,11 @@
 .docx-paper img {
   max-width: 100%;
   height: auto;
+  cursor: grab;
+  user-select: none;
+}
+.docx-paper img:active {
+  cursor: grabbing;
 }
 .docx-paper a {
   color: #047857;

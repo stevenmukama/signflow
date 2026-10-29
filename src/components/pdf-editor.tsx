@@ -29,6 +29,7 @@ import {
   RotateCcw,
   RotateCw,
   Save,
+  ShieldAlert,
   Square,
   Trash2,
   Type,
@@ -367,9 +368,11 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
 
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null)
 
-  // Undo / Redo history
+  // Undo / Redo history with ref tracking to eliminate race conditions
   const [history, setHistory] = useState<EditorStateSnapshot[]>([{ items: [], pages: [] }])
   const [historyIndex, setHistoryIndex] = useState(0)
+  const historyRef = useRef<EditorStateSnapshot[]>([{ items: [], pages: [] }])
+  const historyIndexRef = useRef(0)
 
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -396,24 +399,56 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
 
   const itemsRef = useRef(items)
   itemsRef.current = items
-  const historyIndexRef = useRef(historyIndex)
-  historyIndexRef.current = historyIndex
+
+  const areStatesEqual = (a: EditorStateSnapshot, b: EditorStateSnapshot): boolean => {
+    if (a.pages.length !== b.pages.length) return false
+    for (let i = 0; i < a.pages.length; i++) {
+      if (
+        a.pages[i].id !== b.pages[i].id ||
+        a.pages[i].originalIndex !== b.pages[i].originalIndex ||
+        a.pages[i].rotation !== b.pages[i].rotation
+      ) {
+        return false
+      }
+    }
+    if (a.items.length !== b.items.length) return false
+    return JSON.stringify(a.items) === JSON.stringify(b.items)
+  }
 
   const commitState = useCallback(
     (newItems: PdfEditItem[], newPages?: PageEntry[]) => {
       const targetPages = newPages ?? pagesRef.current
-      setItems(newItems)
-      itemsRef.current = newItems
-      setPages(targetPages)
-      pagesRef.current = targetPages
-      setNumPages(targetPages.length)
 
-      setHistory((prev) => {
-        const next = prev.slice(0, historyIndexRef.current + 1)
-        next.push({ items: newItems, pages: targetPages })
-        return next
-      })
-      setHistoryIndex((prev) => prev + 1)
+      // Prune redo history branch ahead of the current history index
+      const currentHistory = historyRef.current.slice(0, historyIndexRef.current + 1)
+      const currentHead = currentHistory[currentHistory.length - 1]
+
+      // Avoid redundant identical snapshots
+      if (currentHead && areStatesEqual(currentHead, { items: newItems, pages: targetPages })) {
+        setItems(newItems)
+        itemsRef.current = newItems
+        setPages(targetPages)
+        pagesRef.current = targetPages
+        return
+      }
+
+      const nextSnapshot: EditorStateSnapshot = {
+        items: newItems,
+        pages: targetPages,
+      }
+      const nextHistory = [...currentHistory, nextSnapshot]
+      const nextIndex = nextHistory.length - 1
+
+      historyRef.current = nextHistory
+      historyIndexRef.current = nextIndex
+      itemsRef.current = newItems
+      pagesRef.current = targetPages
+
+      setItems(newItems)
+      setPages(targetPages)
+      setNumPages(targetPages.length)
+      setHistory(nextHistory)
+      setHistoryIndex(nextIndex)
     },
     [],
   )
@@ -423,34 +458,38 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
   }, [commitState])
 
   const undo = useCallback(() => {
-    if (historyIndex > 0) {
-      const nextIdx = historyIndex - 1
-      setHistoryIndex(nextIdx)
-      const snap = history[nextIdx]
-      setItems(snap.items)
+    if (historyIndexRef.current > 0) {
+      const nextIdx = historyIndexRef.current - 1
+      historyIndexRef.current = nextIdx
+      const snap = historyRef.current[nextIdx]
+      if (!snap) return
       itemsRef.current = snap.items
-      setPages(snap.pages)
       pagesRef.current = snap.pages
+      setHistoryIndex(nextIdx)
+      setItems(snap.items)
+      setPages(snap.pages)
       setNumPages(snap.pages.length)
       setSelectedId(null)
       setPageNum((p) => Math.min(Math.max(1, p), Math.max(1, snap.pages.length)))
     }
-  }, [history, historyIndex])
+  }, [])
 
   const redo = useCallback(() => {
-    if (historyIndex < history.length - 1) {
-      const nextIdx = historyIndex + 1
-      setHistoryIndex(nextIdx)
-      const snap = history[nextIdx]
-      setItems(snap.items)
+    if (historyIndexRef.current < historyRef.current.length - 1) {
+      const nextIdx = historyIndexRef.current + 1
+      historyIndexRef.current = nextIdx
+      const snap = historyRef.current[nextIdx]
+      if (!snap) return
       itemsRef.current = snap.items
-      setPages(snap.pages)
       pagesRef.current = snap.pages
+      setHistoryIndex(nextIdx)
+      setItems(snap.items)
+      setPages(snap.pages)
       setNumPages(snap.pages.length)
       setSelectedId(null)
       setPageNum((p) => Math.min(Math.max(1, p), Math.max(1, snap.pages.length)))
     }
-  }, [history, historyIndex])
+  }, [])
 
   const rotatePage = (displayIndex: number, deltaDeg: number) => {
     const curPages = pagesRef.current
@@ -665,8 +704,11 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
         setPages(initialPages)
         pagesRef.current = initialPages
         setNumPages(initialPages.length)
-        setHistory([{ items: loadedItems, pages: initialPages }])
+        const initialSnap: EditorStateSnapshot = { items: loadedItems, pages: initialPages }
+        setHistory([initialSnap])
+        historyRef.current = [initialSnap]
         setHistoryIndex(0)
+        historyIndexRef.current = 0
       } catch (err) {
         if (!cancelled) {
           setLoadError(err instanceof Error ? err.message : 'Failed to load PDF')
@@ -845,6 +887,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
       const d = dragRef.current
       if (!d) return
       const rect = d.overlay.getBoundingClientRect()
+      if (rect.width === 0 || rect.height === 0) return
       const curX = clamp((e.clientX - rect.left) / rect.width, 0, 1)
       const curY = clamp((e.clientY - rect.top) / rect.height, 0, 1)
       const dx = curX - d.startX
@@ -853,12 +896,14 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
       if (d.mode === 'draw') {
         const pts = d.points || []
         const last = pts[pts.length - 1]
-        if (!last || Math.hypot(curX - last[0], curY - last[1]) > 0.002) {
-          pts.push([curX, curY])
-          d.points = pts
-          setItems((prev) =>
-            prev.map((it) => (it.id === d.id && it.kind === 'drawing' ? { ...it, points: [...pts] } : it)),
+        if (!last || Math.hypot(curX - last[0], curY - last[1]) > 0.001) {
+          const nextPts: Array<[number, number]> = [...pts, [curX, curY]]
+          d.points = nextPts
+          const updated = itemsRef.current.map((it) =>
+            it.id === d.id && it.kind === 'drawing' ? ({ ...it, points: nextPts } as PdfEditItem) : it,
           )
+          itemsRef.current = updated
+          setItems(updated)
         }
         return
       }
@@ -872,209 +917,232 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
       }
 
       if (d.mode === 'move') {
-        setItems((prev) =>
-          prev.map((it) => {
-            if (it.id !== d.id) return it
-            if (it.kind === 'text') {
-              return {
-                ...it,
-                x: clamp(d.origX + dx, 0, 0.95),
-                y: clamp(d.origY + dy, 0, 0.98),
-              }
-            }
-            if (it.kind === 'signature') {
-              const pAspect = pagePt ? pagePt.h / pagePt.w : 1.3
-              const sigH = typeof it.h === 'number' && it.h > 0 ? it.h : (it.w * it.aspect) / pAspect
-              return {
-                ...it,
-                x: clamp(d.origX + dx, 0, Math.max(0, 1 - it.w)),
-                y: clamp(d.origY + dy, 0, Math.max(0, 1 - sigH)),
-              }
-            }
-            if (it.kind === "drawing") {
-              const basePoints = d.origPoints || it.points
-              const minDx = -d.origX
-              const maxDx = Math.max(minDx, 1 - (d.origX + d.origW))
-              const minDy = -d.origY
-              const maxDy = Math.max(minDy, 1 - (d.origY + d.origH))
-
-              const boundedDx = clamp(dx, minDx, maxDx)
-              const boundedDy = clamp(dy, minDy, maxDy)
-
-              const newPoints = basePoints.map(([px, py]): [number, number] => [
-                clamp(px + boundedDx, 0, 1),
-                clamp(py + boundedDy, 0, 1),
-              ])
-              return { ...it, points: newPoints }
-            }
+        const updated = itemsRef.current.map((it) => {
+          if (it.id !== d.id) return it
+          if (it.kind === 'text') {
             return {
               ...it,
-              x: clamp(d.origX + dx, 0, 1 - it.w),
-              y: clamp(d.origY + dy, 0, 1 - it.h),
+              x: clamp(d.origX + dx, 0, 0.95),
+              y: clamp(d.origY + dy, 0, 0.98),
             }
-          }),
-        )
+          }
+          if (it.kind === 'signature') {
+            const pAspect = pagePt ? pagePt.h / pagePt.w : 1.3
+            const sigH = typeof it.h === 'number' && it.h > 0 ? it.h : (it.w * it.aspect) / pAspect
+            return {
+              ...it,
+              x: clamp(d.origX + dx, 0, Math.max(0, 1 - it.w)),
+              y: clamp(d.origY + dy, 0, Math.max(0, 1 - sigH)),
+            }
+          }
+          if (it.kind === 'drawing') {
+            const basePoints = d.origPoints || it.points
+            const minDx = -d.origX
+            const maxDx = Math.max(minDx, 1 - (d.origX + d.origW))
+            const minDy = -d.origY
+            const maxDy = Math.max(minDy, 1 - (d.origY + d.origH))
+
+            const boundedDx = clamp(dx, minDx, maxDx)
+            const boundedDy = clamp(dy, minDy, maxDy)
+
+            const newPoints = basePoints.map(([px, py]): [number, number] => [
+              clamp(px + boundedDx, 0, 1),
+              clamp(py + boundedDy, 0, 1),
+            ])
+            return { ...it, points: newPoints }
+          }
+          return {
+            ...it,
+            x: clamp(d.origX + dx, 0, 1 - it.w),
+            y: clamp(d.origY + dy, 0, 1 - it.h),
+          }
+        })
+        itemsRef.current = updated
+        setItems(updated)
       } else if (d.mode === 'resize') {
         const handle = d.handle ?? 'se'
         const isBoth = resizeBothSidesRef.current || e.altKey
 
-        setItems((prev) =>
-          prev.map((it) => {
-            if (it.id !== d.id) return it
-            if (it.kind === 'signature') {
-              const pAspect = pagePt ? pagePt.h / pagePt.w : 1.3
-              const origH = d.origH > 0 ? d.origH : (d.origW * (it.aspect || 0.4)) / pAspect
-              const origCenterX = d.origX + d.origW / 2
-              const origCenterY = d.origY + origH / 2
+        const updated = itemsRef.current.map((it) => {
+          if (it.id !== d.id) return it
+          if (it.kind === 'signature') {
+            const pAspect = pagePt ? pagePt.h / pagePt.w : 1.3
+            const origH = d.origH > 0 ? d.origH : (d.origW * (it.aspect || 0.4)) / pAspect
+            const origCenterX = d.origX + d.origW / 2
+            const origCenterY = d.origY + origH / 2
 
-              const affectsX = handle === 'e' || handle === 'w' || handle === 'se' || handle === 'sw' || handle === 'ne' || handle === 'nw'
-              const affectsY = handle === 'n' || handle === 's' || handle === 'se' || handle === 'sw' || handle === 'ne' || handle === 'nw'
+            const affectsX = handle === 'e' || handle === 'w' || handle === 'se' || handle === 'sw' || handle === 'ne' || handle === 'nw'
+            const affectsY = handle === 'n' || handle === 's' || handle === 'se' || handle === 'sw' || handle === 'ne' || handle === 'nw'
 
-              let newX = it.x
-              let newW = it.w
-              let newY = it.y
-              let newH = typeof it.h === 'number' && it.h > 0 ? it.h : origH
+            let newX = it.x
+            let newW = it.w
+            let newY = it.y
+            let newH = typeof it.h === 'number' && it.h > 0 ? it.h : origH
 
-              if (affectsX) {
-                if (isBoth) {
-                  const deltaW = (handle === 'e' || handle === 'se' || handle === 'ne') ? dx * 2 : -dx * 2
-                  const maxSymW = Math.max(0.04, 2 * Math.min(origCenterX, 1 - origCenterX))
-                  newW = clamp(d.origW + deltaW, 0.04, Math.min(0.95, maxSymW))
-                  newX = clamp(origCenterX - newW / 2, 0, Math.max(0, 1 - newW))
-                } else if (handle === 'e' || handle === 'se' || handle === 'ne') {
-                  const maxWidth = Math.max(0.04, 1 - d.origX)
-                  newW = clamp(d.origW + dx, 0.04, Math.min(0.95, maxWidth))
-                  newX = d.origX
-                } else {
-                  const rightEdge = d.origX + d.origW
-                  newW = clamp(d.origW - dx, 0.04, Math.min(0.95, rightEdge))
-                  newX = clamp(rightEdge - newW, 0, Math.max(0, 1 - newW))
-                }
-              }
-
-              if (affectsY) {
-                if (isBoth) {
-                  // Symmetrical vertical resize (both upward & downward from vertical center)
-                  const deltaH = (handle === 's' || handle === 'se' || handle === 'sw') ? dy * 2 : -dy * 2
-                  const maxSymH = Math.max(0.02, 2 * Math.min(origCenterY, 1 - origCenterY))
-                  newH = clamp(origH + deltaH, 0.02, Math.min(0.95, maxSymH))
-                  newY = clamp(origCenterY - newH / 2, 0, Math.max(0, 1 - newH))
-                } else if (handle === 's' || handle === 'se' || handle === 'sw') {
-                  // Downward resize: top edge stays at d.origY, bottom edge moves
-                  const maxHeight = Math.max(0.02, 1 - d.origY)
-                  newH = clamp(origH + dy, 0.02, Math.min(0.95, maxHeight))
-                  newY = d.origY
-                } else {
-                  // Upward resize: bottom edge stays at d.origY + origH, top edge moves upward
-                  const bottomEdge = d.origY + origH
-                  newH = clamp(origH - dy, 0.02, Math.min(0.95, bottomEdge))
-                  newY = clamp(bottomEdge - newH, 0, Math.max(0, 1 - newH))
-                }
-              } else if (affectsX && it.h === undefined) {
-                // Pure width resize when custom height wasn't set: scale height proportionally within page bounds
-                const propH = (newW * (it.aspect || 0.4)) / pAspect
-                if (d.origY + propH <= 1) {
-                  newH = propH
-                } else {
-                  newH = Math.max(0.02, 1 - d.origY)
-                }
-              }
-
-              return { ...it, x: newX, y: newY, w: newW, h: newH }
-            }
-            if (it.kind === 'drawing') {
-              const basePoints = d.origPoints || it.points
-              const handle = d.handle ?? 'se'
-
-              const affectsX =
-                handle === 'e' || handle === 'w' || handle === 'se' || handle === 'sw' || handle === 'ne' || handle === 'nw'
-              const affectsY =
-                handle === 'n' || handle === 's' || handle === 'se' || handle === 'sw' || handle === 'ne' || handle === 'nw'
-
-              let newX = d.origX
-              let newW = d.origW
-              let newY = d.origY
-              let newH = d.origH
-
-              if (affectsX) {
-                if (handle === 'e' || handle === 'se' || handle === 'ne') {
-                  const maxW = Math.max(0.01, 1 - d.origX)
-                  newW = clamp(d.origW + dx, 0.01, maxW)
-                  newX = d.origX
-                } else {
-                  const rightEdge = d.origX + d.origW
-                  newW = clamp(d.origW - dx, 0.01, rightEdge)
-                  newX = clamp(rightEdge - newW, 0, Math.max(0, 1 - newW))
-                }
-              }
-
-              if (affectsY) {
-                if (handle === 's' || handle === 'se' || handle === 'sw') {
-                  const maxH = Math.max(0.01, 1 - d.origY)
-                  newH = clamp(d.origH + dy, 0.01, maxH)
-                  newY = d.origY
-                } else {
-                  const bottomEdge = d.origY + d.origH
-                  newH = clamp(d.origH - dy, 0.01, bottomEdge)
-                  newY = clamp(bottomEdge - newH, 0, Math.max(0, 1 - newH))
-                }
-              }
-
-              const newPoints = basePoints.map(([px, py]): [number, number] => {
-                const normX = d.origW > 0.0001 ? (px - d.origX) / d.origW : 0.5
-                const normY = d.origH > 0.0001 ? (py - d.origY) / d.origH : 0.5
-                return [
-                  clamp(newX + normX * newW, 0, 1),
-                  clamp(newY + normY * newH, 0, 1),
-                ]
-              })
-
-              return { ...it, points: newPoints }
-            }
-            if (it.kind === 'highlight' || it.kind === 'blackout') {
-              if (handle === 'e') {
-                const newW = clamp(d.origW + dx, 0.01, 1 - it.x)
-                return { ...it, w: newW }
-              } else if (handle === 'w') {
+            if (affectsX) {
+              if (isBoth) {
+                const deltaW = (handle === 'e' || handle === 'se' || handle === 'ne') ? dx * 2 : -dx * 2
+                const maxSymW = Math.max(0.04, 2 * Math.min(origCenterX, 1 - origCenterX))
+                newW = clamp(d.origW + deltaW, 0.04, Math.min(0.95, maxSymW))
+                newX = clamp(origCenterX - newW / 2, 0, Math.max(0, 1 - newW))
+              } else if (handle === 'e' || handle === 'se' || handle === 'ne') {
+                const maxWidth = Math.max(0.04, 1 - d.origX)
+                newW = clamp(d.origW + dx, 0.04, Math.min(0.95, maxWidth))
+                newX = d.origX
+              } else {
                 const rightEdge = d.origX + d.origW
-                const newW = clamp(d.origW - dx, 0.01, rightEdge)
-                const newX = clamp(rightEdge - newW, 0, 1)
-                return { ...it, x: newX, w: newW }
+                newW = clamp(d.origW - dx, 0.04, Math.min(0.95, rightEdge))
+                newX = clamp(rightEdge - newW, 0, Math.max(0, 1 - newW))
               }
-              const newW = clamp(d.origW + dx, 0.01, 1 - it.x)
-              const newH = clamp(d.origH + dy, 0.005, 1 - it.y)
-              return { ...it, w: newW, h: newH }
             }
-            return it
-          }),
-        )
+
+            if (affectsY) {
+              if (isBoth) {
+                const deltaH = (handle === 's' || handle === 'se' || handle === 'sw') ? dy * 2 : -dy * 2
+                const maxSymH = Math.max(0.02, 2 * Math.min(origCenterY, 1 - origCenterY))
+                newH = clamp(origH + deltaH, 0.02, Math.min(0.95, maxSymH))
+                newY = clamp(origCenterY - newH / 2, 0, Math.max(0, 1 - newH))
+              } else if (handle === 's' || handle === 'se' || handle === 'sw') {
+                const maxHeight = Math.max(0.02, 1 - d.origY)
+                newH = clamp(origH + dy, 0.02, Math.min(0.95, maxHeight))
+                newY = d.origY
+              } else {
+                const bottomEdge = d.origY + origH
+                newH = clamp(origH - dy, 0.02, Math.min(0.95, bottomEdge))
+                newY = clamp(bottomEdge - newH, 0, Math.max(0, 1 - newH))
+              }
+            } else if (affectsX && it.h === undefined) {
+              const propH = (newW * (it.aspect || 0.4)) / pAspect
+              if (d.origY + propH <= 1) {
+                newH = propH
+              } else {
+                newH = Math.max(0.02, 1 - d.origY)
+              }
+            }
+
+            return { ...it, x: newX, y: newY, w: newW, h: newH }
+          }
+          if (it.kind === 'drawing') {
+            const basePoints = d.origPoints || it.points
+            const handle = d.handle ?? 'se'
+
+            const affectsX =
+              handle === 'e' || handle === 'w' || handle === 'se' || handle === 'sw' || handle === 'ne' || handle === 'nw'
+            const affectsY =
+              handle === 'n' || handle === 's' || handle === 'se' || handle === 'sw' || handle === 'ne' || handle === 'nw'
+
+            let newX = d.origX
+            let newW = d.origW
+            let newY = d.origY
+            let newH = d.origH
+
+            if (affectsX) {
+              if (handle === 'e' || handle === 'se' || handle === 'ne') {
+                const maxW = Math.max(0.01, 1 - d.origX)
+                newW = clamp(d.origW + dx, 0.01, maxW)
+                newX = d.origX
+              } else {
+                const rightEdge = d.origX + d.origW
+                newW = clamp(d.origW - dx, 0.01, rightEdge)
+                newX = clamp(rightEdge - newW, 0, Math.max(0, 1 - newW))
+              }
+            }
+
+            if (affectsY) {
+              if (handle === 's' || handle === 'se' || handle === 'sw') {
+                const maxH = Math.max(0.01, 1 - d.origY)
+                newH = clamp(d.origH + dy, 0.01, maxH)
+                newY = d.origY
+              } else {
+                const bottomEdge = d.origY + d.origH
+                newH = clamp(d.origH - dy, 0.01, bottomEdge)
+                newY = clamp(bottomEdge - newH, 0, Math.max(0, 1 - newH))
+              }
+            }
+
+            const newPoints = basePoints.map(([px, py]): [number, number] => {
+              const normX = d.origW > 0.0001 ? (px - d.origX) / d.origW : 0.5
+              const normY = d.origH > 0.0001 ? (py - d.origY) / d.origH : 0.5
+              return [
+                clamp(newX + normX * newW, 0, 1),
+                clamp(newY + normY * newH, 0, 1),
+              ]
+            })
+
+            return { ...it, points: newPoints }
+          }
+          if (it.kind === 'highlight' || it.kind === 'blackout') {
+            if (handle === 'e') {
+              const newW = clamp(d.origW + dx, 0.01, 1 - it.x)
+              return { ...it, w: newW }
+            } else if (handle === 'w') {
+              const rightEdge = d.origX + d.origW
+              const newW = clamp(d.origW - dx, 0.01, rightEdge)
+              const newX = clamp(rightEdge - newW, 0, 1)
+              return { ...it, x: newX, w: newW }
+            }
+            const newW = clamp(d.origW + dx, 0.01, 1 - it.x)
+            const newH = clamp(d.origH + dy, 0.005, 1 - it.y)
+            return { ...it, w: newW, h: newH }
+          }
+          return it
+        })
+        itemsRef.current = updated
+        setItems(updated)
       } else if (d.mode === 'create-rect') {
         const x = Math.min(d.anchorX, curX)
         const y = Math.min(d.anchorY, curY)
         const w = Math.abs(curX - d.anchorX)
         const h = Math.abs(curY - d.anchorY)
-        setItems((prev) =>
-          prev.map((it) => {
-            if (it.id !== d.id) return it
-            return { ...it, x, y, w, h } as PdfEditItem
-          }),
-        )
+        const updated = itemsRef.current.map((it) => {
+          if (it.id !== d.id) return it
+          return { ...it, x, y, w, h } as PdfEditItem
+        })
+        itemsRef.current = updated
+        setItems(updated)
       }
     }
 
-    const onUp = () => {
+    const onUp = (e: PointerEvent) => {
       const d = dragRef.current
-      if (d?.mode === 'draw') {
-        commitItems(itemsRef.current)
-      } else if (d?.mode === 'create-rect') {
-        const it = itemsRef.current.find((i) => i.id === d.id)
-        if (it && it.kind !== 'text' && it.kind !== 'signature' && it.kind !== 'drawing' && it.w < 0.01 && it.h < 0.01) {
-          const pruned = itemsRef.current.filter((i) => i.id !== d.id)
-          commitItems(pruned)
-        } else {
-          commitItems(itemsRef.current)
+      if (!d) return
+
+      // Include final pointer movement upon release
+      const rect = d.overlay.getBoundingClientRect()
+      const curX = rect.width > 0 ? clamp((e.clientX - rect.left) / rect.width, 0, 1) : d.startX
+      const curY = rect.height > 0 ? clamp((e.clientY - rect.top) / rect.height, 0, 1) : d.startY
+
+      if (d.mode === 'draw') {
+        const pts = d.points || []
+        const last = pts[pts.length - 1]
+        let finalPts = pts
+        if (!last || Math.hypot(curX - last[0], curY - last[1]) >= 0.001) {
+          finalPts = [...pts, [curX, curY]]
         }
-      } else if (d && (d.mode === 'move' || d.mode === 'resize')) {
+        if (finalPts.length === 1) {
+          finalPts = [finalPts[0], [clamp(finalPts[0][0] + 0.0001, 0, 1), clamp(finalPts[0][1] + 0.0001, 0, 1)]]
+        }
+        const updated = itemsRef.current.map((it) =>
+          it.id === d.id && it.kind === 'drawing' ? ({ ...it, points: finalPts } as PdfEditItem) : it,
+        )
+        itemsRef.current = updated
+        commitItems(updated)
+      } else if (d.mode === 'create-rect') {
+        const x = Math.min(d.anchorX, curX)
+        const y = Math.min(d.anchorY, curY)
+        let w = Math.abs(curX - d.anchorX)
+        let h = Math.abs(curY - d.anchorY)
+        // If clicked/tapped without significant drag, assign standard default size so shape never disappears
+        if (w < 0.015 && h < 0.015) {
+          w = clamp(0.18, 0.02, 1 - x)
+          h = clamp(0.035, 0.01, 1 - y)
+        }
+        const updated = itemsRef.current.map((it) =>
+          it.id === d.id ? ({ ...it, x, y, w, h } as PdfEditItem) : it,
+        )
+        itemsRef.current = updated
+        commitItems(updated)
+      } else if (d.mode === 'move' || d.mode === 'resize') {
         commitItems(itemsRef.current)
       }
       dragRef.current = null
@@ -1169,9 +1237,12 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
   // ------------------------------------------------------ overlay interactions
   const onOverlayPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.target !== overlayRef.current) return
+    // Guard against non-primary buttons, right clicks, or duplicate touches
+    if (!e.isPrimary || e.button !== 0 || dragRef.current) return
     const overlay = overlayRef.current
     if (!overlay) return
     const rect = overlay.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) return
     const fx = clamp((e.clientX - rect.left) / rect.width, 0, 1)
     const fy = clamp((e.clientY - rect.top) / rect.height, 0, 1)
 
@@ -1192,7 +1263,9 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
         strokeWidth: penWidth,
         opacity: 1,
       }
-      setItems((prev) => [...prev, newItem])
+      const nextItems = [...itemsRef.current, newItem]
+      itemsRef.current = nextItems
+      setItems(nextItems)
       startDrag({
         mode: 'draw',
         id,
@@ -1221,7 +1294,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
         fontSize: 14,
         color: '#111827',
       }
-      commitItems([...items, item])
+      commitItems([...itemsRef.current, item])
       setSelectedId(item.id)
       justCreatedId.current = item.id
       setTool('select')
@@ -1244,7 +1317,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
         fontSize: 14,
         color: '#111827',
       }
-      commitItems([...items, item])
+      commitItems([...itemsRef.current, item])
       setSelectedId(item.id)
       setTool('select')
       return
@@ -1261,7 +1334,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
         fontSize: 22,
         color: '#047857',
       }
-      commitItems([...items, item])
+      commitItems([...itemsRef.current, item])
       setSelectedId(item.id)
       setTool('select')
       return
@@ -1279,7 +1352,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
         aspect: pendingSig.aspect,
         dataUrl: pendingSig.dataUrl,
       }
-      commitItems([...items, item])
+      commitItems([...itemsRef.current, item])
       setSelectedId(item.id)
       setPendingSig(null)
       setTool('select')
@@ -1288,18 +1361,19 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
 
     if (tool === 'highlight' || tool === 'blackout') {
       const id = newId()
-      setItems((prev) => [
-        ...prev,
-        {
-          id,
-          kind: tool,
-          page: pageNum - 1,
-          x: fx,
-          y: fy,
-          w: 0,
-          h: 0,
-        },
-      ])
+      const newRect: PdfEditItem = {
+        id,
+        kind: tool,
+        page: pageNum - 1,
+        x: fx,
+        y: fy,
+        w: 0,
+        h: 0,
+        ...(tool === 'highlight' ? { color: '#fef08a' } : {}),
+      }
+      const nextItems = [...itemsRef.current, newRect]
+      itemsRef.current = nextItems
+      setItems(nextItems)
       setSelectedId(id)
       startDrag({
         mode: 'create-rect',
@@ -1372,50 +1446,163 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
     }
   }
 
-  // --------------------------------------------------------------------- save
-  const handleSave = async () => {
-    if (pages.length === 0) return
+  const isSavingRef = useRef(false)
+  const [downloading, setDownloading] = useState(false)
+  const isDownloadingRef = useRef(false)
+
+  // --------------------------------------------------------------------- save & export
+  const performSave = async (showToast = true): Promise<boolean> => {
+    if (isSavingRef.current || loading || pagesRef.current.length === 0) return false
+    isSavingRef.current = true
     setSaving(true)
+
+    // Flush any focused contentEditable element before gathering save payload
+    if (
+      typeof document !== 'undefined' &&
+      document.activeElement &&
+      document.activeElement instanceof HTMLElement &&
+      document.activeElement.isContentEditable
+    ) {
+      document.activeElement.blur()
+    }
+
+    const curPages = pagesRef.current
+    const curItems = itemsRef.current
+    const pageOps: PageOps = {
+      order: curPages.map((p) => p.originalIndex),
+      rotations: curPages.reduce<Record<number, number>>((acc, p, idx) => {
+        if (p.rotation !== 0) acc[idx] = p.rotation
+        return acc
+      }, {}),
+    }
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 45000)
+
     try {
-      const pageOps: PageOps = {
-        order: pages.map((p) => p.originalIndex),
-        rotations: pages.reduce<Record<number, number>>((acc, p, idx) => {
-          if (p.rotation !== 0) acc[idx] = p.rotation
-          return acc
-        }, {}),
-      }
       const res = await fetch(`/api/documents/${docId}/pdf-save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items, pageOps }),
+        body: JSON.stringify({ items: curItems, pageOps }),
+        signal: controller.signal,
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Could not save the document.')
-      toast({
-        title: 'Saved successfully',
-        description:
-          'Your edits and page changes were saved into the PDF file.',
-      })
+      clearTimeout(timeoutId)
+
+      const resText = await res.text()
+      let data: { ok?: boolean; error?: string } = {}
+      if (resText) {
+        try {
+          data = JSON.parse(resText)
+        } catch {
+          throw new Error(`Server returned invalid response (${res.status})`)
+        }
+      }
+
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || `Save failed with status ${res.status}`)
+      }
+
+      if (showToast) {
+        toast({
+          title: 'Saved successfully',
+          description: 'Your edits and page changes were saved into the PDF file.',
+        })
+      }
       onSaved()
+      return true
     } catch (err) {
+      clearTimeout(timeoutId)
+      const message =
+        err instanceof DOMException && err.name === 'AbortError'
+          ? 'Save request timed out. Please try again.'
+          : err instanceof Error
+            ? err.message
+            : 'Could not save the document.'
       toast({
         title: 'Save failed',
-        description: err instanceof Error ? err.message : 'Unknown error',
+        description: message,
         variant: 'destructive',
       })
+      return false
     } finally {
+      isSavingRef.current = false
       setSaving(false)
     }
   }
 
-  const tools: { id: PdfTool; icon: React.ComponentType<{ className?: string }>; label: string }[] = [
+  const handleSave = () => {
+    void performSave(true)
+  }
+
+  const handleDownload = async () => {
+    if (isDownloadingRef.current || isSavingRef.current || loading) return
+    isDownloadingRef.current = true
+    setDownloading(true)
+
+    try {
+      // 1. Bake latest edits to the server PDF first
+      const saved = await performSave(false)
+      if (!saved) {
+        throw new Error('Could not prepare latest changes before downloading.')
+      }
+
+      // 2. Fetch the exported PDF file
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 45000)
+      const res = await fetch(`/api/documents/${docId}/download`, {
+        signal: controller.signal,
+      })
+      clearTimeout(timeoutId)
+
+      if (!res.ok) {
+        throw new Error(`Download failed with status ${res.status}`)
+      }
+
+      const blob = await res.blob()
+      if (blob.size === 0) {
+        throw new Error('Exported PDF file is empty')
+      }
+
+      // 3. Trigger file download
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = docName.toLowerCase().endsWith('.pdf') ? docName : `${docName}.pdf`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 2000)
+
+      toast({
+        title: 'Download complete',
+        description: 'Your exported PDF with all edits has been downloaded.',
+      })
+    } catch (err) {
+      const message =
+        err instanceof DOMException && err.name === 'AbortError'
+          ? 'Download timed out. Please try again.'
+          : err instanceof Error
+            ? err.message
+            : 'Could not download the document.'
+      toast({
+        title: 'Download failed',
+        description: message,
+        variant: 'destructive',
+      })
+    } finally {
+      isDownloadingRef.current = false
+      setDownloading(false)
+    }
+  }
+
+  const tools: { id: PdfTool; icon: React.ComponentType<{ className?: string }>; label: string; tooltip?: string }[] = [
     { id: 'select', icon: MousePointer2, label: 'Select & move' },
     { id: 'text', icon: Type, label: 'Add text' },
     { id: 'draw', icon: Pencil, label: 'Draw / Pen' },
     { id: 'date', icon: Calendar, label: 'Date stamp' },
     { id: 'check', icon: Check, label: 'Checkmark' },
-    { id: 'highlight', icon: Highlighter, label: 'Highlight' },
-    { id: 'blackout', icon: Square, label: 'Redact (black box)' },
+    { id: 'highlight', icon: Highlighter, label: 'Highlight', tooltip: 'Highlighter: Translucent overlay that preserves readable text beneath' },
+    { id: 'blackout', icon: Square, label: 'Permanent Redaction', tooltip: 'Permanent Redaction: Content under this box is permanently erased and unrecoverable in exported PDF' },
   ]
 
   return (
@@ -1466,13 +1653,18 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
           </Badge>
 
           <div className="ml-auto flex items-center gap-2">
-            <Button variant="outline" size="sm" asChild>
-              <a href={`/api/documents/${docId}/download`} aria-label="Download PDF">
-                <Download className="size-4" />
-                <span className="hidden sm:inline">Download</span>
-              </a>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleDownload}
+              disabled={saving || downloading || loading}
+              aria-label="Download PDF"
+              title="Export and download PDF with all latest edits"
+            >
+              {downloading ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
+              <span className="hidden sm:inline">Download</span>
             </Button>
-            <Button size="sm" onClick={handleSave} disabled={saving || loading}>
+            <Button size="sm" onClick={handleSave} disabled={saving || downloading || loading}>
               {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
               Save
             </Button>
@@ -1646,7 +1838,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                   if (t.id !== 'select') setSelectedId(null)
                   if (t.id !== 'signature') setPendingSig(null)
                 }}
-                title={t.label}
+                title={t.tooltip || t.label}
                 aria-label={t.label}
               >
                 <t.icon className="size-4" />
@@ -1913,9 +2105,11 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                             spellCheck={false}
                             onInput={(e) => {
                               const newText = (e.currentTarget as HTMLElement).innerText
-                              setItems((prev) =>
-                                prev.map((it) => (it.id === item.id ? { ...it, text: newText } : it)),
+                              const updated = itemsRef.current.map((it) =>
+                                it.id === item.id ? ({ ...it, text: newText } as PdfEditItem) : it,
                               )
+                              itemsRef.current = updated
+                              setItems(updated)
                             }}
                             onBlur={(e) => {
                               const newText = (e.currentTarget as HTMLElement).innerText
@@ -2379,8 +2573,23 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                           ? 'Highlight'
                           : selectedItem.kind === 'drawing'
                             ? 'Drawing / Pen'
-                            : 'Redaction'}
+                            : 'Permanent Redaction'}
                   </span>
+                  {selectedItem.kind === 'blackout' && (
+                    <>
+                      <Separator orientation="vertical" className="h-6" />
+                      <div className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1 rounded border border-amber-200 dark:border-amber-900/50">
+                        <ShieldAlert className="size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                        <span><strong>Permanent Redaction</strong>: Underlying text, images, and content on this page are permanently erased and unrecoverable upon export.</span>
+                      </div>
+                    </>
+                  )}
+                  {selectedItem.kind === 'highlight' && (
+                    <>
+                      <Separator orientation="vertical" className="h-6" />
+                      <span className="text-xs text-muted-foreground">Translucent highlighter overlay (preserves selectable text beneath).</span>
+                    </>
+                  )}
                   {selectedItem.kind === 'drawing' && (
                     <>
                       <Separator orientation="vertical" className="h-6" />
@@ -2581,7 +2790,7 @@ export default function PdfEditor({ docId, name: initialName, onBack, onSaved }:
                   {tool === 'date' && 'Click anywhere to stamp today’s date.'}
                   {tool === 'check' && 'Click anywhere to stamp a checkmark.'}
                   {tool === 'highlight' && 'Click and drag on the page to highlight an area.'}
-                  {tool === 'blackout' && 'Click and drag to draw a redaction box. On save, everything underneath is permanently removed from the PDF.'}
+                  {tool === 'blackout' && 'Permanent Redaction: Click and drag to place a redaction box. On save/export, all underlying text, images, and content on this page are permanently erased and unrecoverable.'}
                   {tool === 'signature' && 'Click anywhere on the page to place your signature.'}
                 </p>
               )}
